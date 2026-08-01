@@ -1,0 +1,26 @@
+name: Post Daily Economic Calendar
+
+on:
+  schedule:
+    - cron: "45 5 * * 1-5"
+      timezone: "America/New_York"
+
+  workflow_dispatch:
+
+jobs:
+  post-economic-calendar:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Post economic calendar to Discord
+        env:
+          ECONOMIC_CALENDAR_WEBHOOK: ${{ secrets.ECONOMIC_CALENDAR_WEBHOOK }}
+        run: python economic_calendar.py
