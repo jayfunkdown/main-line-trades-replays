@@ -1,0 +1,54 @@
+name: Post YouTube live replays to Discord
+
+on:
+  schedule:
+    - cron: "7,17,27,37,47,57 * * * *"
+
+  workflow_dispatch:
+    inputs:
+      send_test:
+        description: "Send a test message to Discord"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: youtube-replay-check
+  cancel-in-progress: false
+
+jobs:
+  check-youtube:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check YouTube and post matching replays
+        env:
+          YOUTUBE_CHANNEL_ID: ${{ secrets.YOUTUBE_CHANNEL_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          TITLE_PREFIX: "🔴 Live trading Crypto Futures Forex Stocks - NY Open"
+          SEND_TEST: ${{ inputs.send_test || 'false' }}
+        run: python replay_to_discord.py
+
+      - name: Save replay history
+        run: |
+          if git diff --quiet -- data/posted_ids.json; then
+            echo "No state change to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/posted_ids.json
+          git commit -m "Update posted YouTube replay history"
+          git push
