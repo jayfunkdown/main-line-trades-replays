@@ -2,8 +2,8 @@ name: Post Daily Economic Calendar
 
 on:
   schedule:
-    - cron: "45 5 * * 1-5"
-      timezone: "America/New_York"
+    # 9:45 UTC = 5:45 AM EDT
+    - cron: "45 9 * * 1-5"
 
   workflow_dispatch:
 
