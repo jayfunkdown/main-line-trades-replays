@@ -1,0 +1,27 @@
+name: Post Morning Brief
+
+on:
+  schedule:
+    # 10:00 UTC = 6:00 AM Eastern during daylight saving time
+    - cron: "0 10 * * 1-5"
+
+  workflow_dispatch:
+
+jobs:
+  post-morning-brief:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Post morning brief to Discord
+        env:
+          MORNING_BRIEF_WEBHOOK: ${{ secrets.MORNING_BRIEF_WEBHOOK }}
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+        run: python morning_brief.py
