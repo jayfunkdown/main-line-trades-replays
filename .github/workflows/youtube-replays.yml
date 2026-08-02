@@ -36,7 +36,7 @@ jobs:
         env:
           YOUTUBE_CHANNEL_ID: ${{ secrets.YOUTUBE_CHANNEL_ID }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          TITLE_PREFIX: "🔴 Live trading Crypto Futures Forex Stocks - NY Open"
+          TITLE_PREFIX: "🔴 Live trading"
           SEND_TEST: ${{ inputs.send_test || 'false' }}
         run: python scripts/replay_to_discord.py
 
