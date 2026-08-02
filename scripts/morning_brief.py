@@ -514,16 +514,25 @@ def get_market_snapshot():
 
 
 def get_key_markets():
-    return [
-        {
-            "symbol": symbol,
-            "name": name,
-            "is_crypto": is_crypto,
-            "quote": get_quote(symbol),
-        }
-        for symbol, name, is_crypto
-        in KEY_MARKETS
-    ]
+    results = []
+
+    for symbol, name, is_crypto in KEY_MARKETS:
+        display_symbol = (
+            "BTC"
+            if symbol == "BINANCE:BTCUSDT"
+            else symbol
+        )
+
+        results.append(
+            {
+                "symbol": display_symbol,
+                "name": name,
+                "is_crypto": is_crypto,
+                "quote": get_quote(symbol),
+            }
+        )
+
+    return results
 
 
 def direction_icon(percent_change):
@@ -883,6 +892,15 @@ def build_market_message(
             quote_line(item)
         )
 
+    lines.extend(
+        [
+            "",
+            "━━━━━━━━━━━━━━━━━━━━━━",
+            "",
+            "📅 **Today's earnings calendar below.**",
+        ]
+    )
+
     return "\n".join(lines).strip()
 
 
@@ -892,6 +910,8 @@ def build_earnings_message(earnings):
     )
 
     lines = [
+        "",
+        "",
         "# 📅 Today's Earnings Calendar",
         "",
         (
