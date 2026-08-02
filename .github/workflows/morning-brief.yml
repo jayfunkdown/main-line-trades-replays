@@ -24,4 +24,4 @@ jobs:
         env:
           MORNING_BRIEF_WEBHOOK: ${{ secrets.MORNING_BRIEF_WEBHOOK }}
           FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
-        run: python morning_brief.py
+        run: python scripts/morning_brief.py
