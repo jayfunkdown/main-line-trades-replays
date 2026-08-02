@@ -861,7 +861,7 @@ def build_market_message(
 
     lines.extend(
         [
-            "---",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
             "",
             "## 📈 U.S. Market Snapshot",
             "",
@@ -881,7 +881,7 @@ def build_market_message(
                 "are not futures contracts.*"
             ),
             "",
-            "---",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
             "",
             "## 💰 Key Markets",
             "",
@@ -893,6 +893,14 @@ def build_market_message(
             quote_line(item)
         )
 
+    lines.extend(
+        [
+            "",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "",
+            "📈 Good luck today!",
+        ]
+    )
 
     return "\n".join(lines).strip()
 
@@ -903,8 +911,6 @@ def build_earnings_message(earnings):
     )
 
     lines = [
-        "",
-        "",
         "# 📅 Today's Earnings Calendar",
         "",
         (
@@ -972,11 +978,13 @@ def build_earnings_message(earnings):
 
     lines.extend(
         [
-            "---",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
             "",
             "## 🧠 Trading Focus",
             "",
             f"*“{quote}”*",
+            "",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
             "",
             "## 🎥 Live Today",
             "",
@@ -995,6 +1003,8 @@ def build_earnings_message(earnings):
                 "Trade smart, manage your risk, "
                 "and we'll see you live! 📈"
             ),
+            "",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         ]
     )
 
