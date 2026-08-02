@@ -1,0 +1,46 @@
+name: Filter Truth Social Posts
+
+on:
+  schedule:
+    - cron: "3,13,23,33,43,53 * * * *"
+
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: trump-filter
+  cancel-in-progress: false
+
+jobs:
+  filter-posts:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Filter Truth Social posts
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          TRUMP_RAW_CHANNEL_ID: ${{ secrets.TRUMP_RAW_CHANNEL_ID }}
+          TRUMP_WEBHOOK: ${{ secrets.TRUMP_WEBHOOK }}
+        run: python scripts/trump_filter.py
+
+      - name: Save state
+        run: |
+          if git diff --quiet -- data/trump_processed.json; then
+            echo "No state changes."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add data/trump_processed.json
+          git commit -m "Update Trump processed state"
+          git push
