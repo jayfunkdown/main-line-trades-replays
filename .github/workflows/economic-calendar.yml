@@ -21,4 +21,4 @@ jobs:
       - name: Post economic calendar to Discord
         env:
           ECONOMIC_CALENDAR_WEBHOOK: ${{ secrets.ECONOMIC_CALENDAR_WEBHOOK }}
-        run: python economic_calendar.py
+        run: python scripts/economic_calendar.py
