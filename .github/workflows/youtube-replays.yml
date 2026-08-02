@@ -38,7 +38,7 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           TITLE_PREFIX: "🔴 Live trading Crypto Futures Forex Stocks - NY Open"
           SEND_TEST: ${{ inputs.send_test || 'false' }}
-        run: python replay_to_discord.py
+        run: python scripts/replay_to_discord.py
 
       - name: Save replay history
         run: |
