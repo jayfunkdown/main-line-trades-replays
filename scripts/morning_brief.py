@@ -897,8 +897,6 @@ def build_market_message(
         [
             "",
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-            "",
-            "📈 Good luck today!",
         ]
     )
 
