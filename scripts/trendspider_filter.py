@@ -227,21 +227,41 @@ def is_promotional(text):
 
 
 def clean_text(text, original_url):
-    cleaned = text
+    lines = []
 
-    if original_url:
-        cleaned = cleaned.replace(
-            original_url,
+    unwanted_exact_lines = {
+        "TrendSpider",
+        "@TrendSpider",
+        "TrendSpider (@TrendSpider)",
+        "TrendSpider (@TrendSpider) on X",
+        "@TrendSpider quoted @TrendSpider",
+    }
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+
+        if not line:
+            continue
+
+        if line in unwanted_exact_lines:
+            continue
+
+        if original_url:
+            line = line.replace(original_url, "").strip()
+
+        # Remove X shortened links
+        line = re.sub(
+            r"https?://t\.co/\S+",
             "",
-        )
+            line,
+            flags=re.IGNORECASE,
+        ).strip()
 
-    cleaned = re.sub(
-        r"\n{3,}",
-        "\n\n",
-        cleaned,
-    )
+        if line and line not in lines:
+            lines.append(line)
 
-    return cleaned.strip()
+    return "\n\n".join(lines).strip()
+
 
 
 def build_public_message(text, original_url):
@@ -261,7 +281,9 @@ def build_public_message(text, original_url):
     if original_url:
         lines.extend(
             [
-                "🔗 **View the original post**",
+                "━━━━━━━━━━━━━━━━━━━━━━",
+                "",
+                "🔗 **Original TrendSpider Post**",
                 f"<{original_url}>",
             ]
         )
