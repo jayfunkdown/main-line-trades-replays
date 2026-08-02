@@ -1,15 +1,44 @@
-# Main Line Trades — YouTube replay to Discord
+# Main Line Trades Automation
 
-This workflow checks the public YouTube feed every 10 minutes, filters titles beginning with:
+This repository powers the Main Line Trades Discord automation system.
 
-`🔴 Live trading Crypto Futures Forex Stocks - NY Open`
+## Current Automations
 
-and posts new matches to Discord.
+### 🎥 YouTube Replay Bot
 
-Add these repository secrets:
+Posts completed livestream replays automatically.
 
-- `YOUTUBE_CHANNEL_ID`
-- `DISCORD_WEBHOOK_URL`
+### 🌅 Morning Brief
 
-First manual run with **Send a test message to Discord** enabled tests the webhook.
-First normal run records existing matching videos without posting old replays.
+Posts every weekday before the New York Open with:
+
+- High-impact USD events
+- Major earnings
+- Market snapshot
+- Key markets
+- Daily trading reminder
+- Livestream reminder
+
+### 🗓 Economic Calendar
+
+Posts scheduled high-impact USD economic events.
+
+---
+
+## Repository Structure
+
+```
+.github/workflows/
+scripts/
+data/
+```
+
+---
+
+Future automations:
+
+- TrendSpider formatter
+- Trump formatter
+- Daily Watchlist
+- Weekly Market Recap
+- Market Dashboard
