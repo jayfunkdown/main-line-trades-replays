@@ -6,6 +6,7 @@ import random
 import re
 import urllib.parse
 import urllib.request
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -892,14 +893,6 @@ def build_market_message(
             quote_line(item)
         )
 
-    lines.extend(
-        [
-            "",
-            "━━━━━━━━━━━━━━━━━━━━━━",
-            "",
-            "📅 **Today's earnings calendar below.**",
-        ]
-    )
 
     return "\n".join(lines).strip()
 
@@ -1149,10 +1142,11 @@ def send_webhook_message(message):
 def post_messages(messages):
     message_number = 0
 
-    for message in messages:
-        chunks = split_discord_message(
-            message
-        )
+    for index, message in enumerate(messages):
+        if index > 0:
+            time.sleep(10)
+
+        chunks = split_discord_message(message)
 
         for chunk in chunks:
             message_number += 1
