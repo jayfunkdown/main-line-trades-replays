@@ -266,30 +266,25 @@ def clean_text(text, original_url):
 
 def build_public_message(text, original_url):
     lines = [
-        "# 📊 TrendSpider Chart",
+        "📊 **TrendSpider**",
         "",
     ]
 
     if text:
-        lines.extend(
-            [
-                text,
-                "",
-            ]
-        )
+        lines.extend([
+            text,
+            "",
+        ])
 
     if original_url:
-        lines.extend(
-            [
-                "━━━━━━━━━━━━━━━━━━━━━━",
-                "",
-                "🔗 **Original TrendSpider Post**",
-                f"<{original_url}>",
-            ]
-        )
+        lines.extend([
+            "━━━━━━━━━━━━━━━━━━━━━━",
+            "",
+            "🔗 **Original Post**",
+            f"<{original_url}>",
+        ])
 
     return "\n".join(lines).strip()
-
 
 def post_to_public_channel(
     message_text,
