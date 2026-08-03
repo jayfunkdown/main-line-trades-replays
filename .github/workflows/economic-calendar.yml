@@ -1,8 +1,6 @@
 name: Post Daily Economic Calendar
 
 on:
-  schedule:
-    - cron: "45 9 * * 1-5"
   workflow_dispatch:
 
 jobs:
