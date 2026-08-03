@@ -1,10 +1,6 @@
 name: Post Morning Brief
 
 on:
-  schedule:
-    # 10:00 UTC = 6:00 AM Eastern during daylight saving time
-    - cron: "0 10 * * 1-5"
-
   workflow_dispatch:
 
 jobs:
