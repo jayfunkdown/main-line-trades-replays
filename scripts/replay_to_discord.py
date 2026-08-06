@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import json, os, sys, urllib.request, xml.etree.ElementTree as ET
 from pathlib import Path
 
