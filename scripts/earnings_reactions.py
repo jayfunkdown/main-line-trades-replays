@@ -3,17 +3,35 @@
 """
 Main Line Trades - Earnings Reactions
 
-Reads completed U.S. earnings reports from Finnhub and posts
-high-signal earnings reactions to Discord.
+Creates two ranked earnings feeds:
+
+1. Public earnings reactions
+   - High-importance names only
+   - Default maximum: 15
+
+2. Private earnings review
+   - Broader chart-review queue
+   - Default maximum: 50
+
+Price movement is the primary ranking factor.
 
 Required environment variables:
     FINNHUB_API_KEY
+
+Required for public posting:
     EARNINGS_REACTIONS_WEBHOOK
 
-Optional environment variables:
-    EARNINGS_MIN_EPS_SURPRISE_PCT       Default: 10
-    EARNINGS_MIN_REVENUE_SURPRISE_PCT   Default: 5
-    EARNINGS_MIN_PRICE_MOVE_PCT         Default: 8
+Optional for private posting:
+    EARNINGS_REVIEW_WEBHOOK
+
+Optional configuration:
+    EARNINGS_PUBLIC_MAX=15
+    EARNINGS_PRIVATE_MAX=50
+    EARNINGS_PRIVATE_MOVE_PCT=5
+    EARNINGS_PUBLIC_MOVE_PCT=8
+    EARNINGS_PRIORITY_PRIVATE_MOVE_PCT=3
+    EARNINGS_PRIORITY_PUBLIC_MOVE_PCT=5
+    EARNINGS_QUOTE_DELAY_SECONDS=1.1
 """
 
 from __future__ import annotations
@@ -37,12 +55,13 @@ EASTERN = ZoneInfo("America/New_York")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 STATE_FILE = PROJECT_ROOT / "data" / "earnings_reactions_state.json"
 
-WEBHOOK_USERNAME = "Main Line Trades Earnings"
-USER_AGENT = "MainLineTrades-EarningsReactions/1.0"
+USER_AGENT = "MainLineTrades-EarningsReactions/2.0"
+PUBLIC_WEBHOOK_USERNAME = "Main Line Trades Earnings"
+PRIVATE_WEBHOOK_USERNAME = "Main Line Trades Research"
 
 DIVIDER = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-# These names can post even when the numerical surprise is modest.
+
 PRIORITY_TICKERS = {
     "AAPL",
     "ABNB",
@@ -124,6 +143,20 @@ def required_env(name: str) -> str:
     return value
 
 
+def env_int(name: str, default: int) -> int:
+    raw_value = os.getenv(name, "").strip()
+
+    if not raw_value:
+        return default
+
+    try:
+        return int(raw_value)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"{name} must be an integer."
+        ) from exc
+
+
 def env_float(name: str, default: float) -> float:
     raw_value = os.getenv(name, "").strip()
 
@@ -134,8 +167,18 @@ def env_float(name: str, default: float) -> float:
         return float(raw_value)
     except ValueError as exc:
         raise RuntimeError(
-            f"{name} must be a number, not {raw_value!r}."
+            f"{name} must be a number."
         ) from exc
+
+
+def safe_number(value: Any) -> float | None:
+    if value is None:
+        return None
+
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def get_json(
@@ -156,8 +199,8 @@ def get_json(
             request,
             timeout=timeout,
         ) as response:
-            raw_body = response.read().decode("utf-8")
-            return json.loads(raw_body)
+            body = response.read().decode("utf-8")
+            return json.loads(body)
 
     except urllib.error.HTTPError as exc:
         body = exc.read().decode(
@@ -179,10 +222,8 @@ def finnhub_get(
     endpoint: str,
     parameters: dict[str, str],
 ) -> dict[str, Any]:
-    api_key = required_env("FINNHUB_API_KEY")
-
     query = dict(parameters)
-    query["token"] = api_key
+    query["token"] = required_env("FINNHUB_API_KEY")
 
     url = (
         f"{FINNHUB_BASE_URL}{endpoint}?"
@@ -192,58 +233,39 @@ def finnhub_get(
     return get_json(url)
 
 
-def load_state() -> dict[str, Any]:
-    if not STATE_FILE.exists():
-        return {
-            "posted": {},
-        }
+def get_quote_with_retry(
+    symbol: str,
+    *,
+    maximum_attempts: int = 4,
+) -> dict[str, Any]:
+    for attempt in range(1, maximum_attempts + 1):
+        try:
+            return finnhub_get(
+                "/quote",
+                {
+                    "symbol": symbol,
+                },
+            )
 
-    try:
-        data = json.loads(
-            STATE_FILE.read_text(encoding="utf-8")
-        )
-    except (OSError, json.JSONDecodeError):
-        return {
-            "posted": {},
-        }
+        except RuntimeError as exc:
+            error_text = str(exc)
 
-    if not isinstance(data, dict):
-        return {
-            "posted": {},
-        }
+            if "HTTP 429" not in error_text:
+                raise
 
-    data.setdefault("posted", {})
-    return data
+            if attempt == maximum_attempts:
+                raise
 
+            wait_seconds = 10 * attempt
 
-def save_state(state: dict[str, Any]) -> None:
-    STATE_FILE.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+            print(
+                f"Finnhub rate limit for {symbol}. "
+                f"Waiting {wait_seconds} seconds..."
+            )
 
-    temporary_file = STATE_FILE.with_suffix(".tmp")
+            time.sleep(wait_seconds)
 
-    temporary_file.write_text(
-        json.dumps(
-            state,
-            indent=2,
-            sort_keys=True,
-        ),
-        encoding="utf-8",
-    )
-
-    temporary_file.replace(STATE_FILE)
-
-
-def safe_number(value: Any) -> float | None:
-    if value is None:
-        return None
-
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+    return {}
 
 
 def surprise_percent(
@@ -266,6 +288,25 @@ def surprise_percent(
         / denominator
         * 100
     )
+
+
+def result_direction(
+    actual: Any,
+    estimate: Any,
+) -> str:
+    actual_number = safe_number(actual)
+    estimate_number = safe_number(estimate)
+
+    if actual_number is None or estimate_number is None:
+        return "unknown"
+
+    if actual_number > estimate_number:
+        return "beat"
+
+    if actual_number < estimate_number:
+        return "miss"
+
+    return "inline"
 
 
 def format_eps(value: Any) -> str:
@@ -297,25 +338,6 @@ def format_revenue(value: Any) -> str:
     return f"${number:,.0f}"
 
 
-def result_label(
-    actual: Any,
-    estimate: Any,
-) -> tuple[str, str]:
-    actual_number = safe_number(actual)
-    estimate_number = safe_number(estimate)
-
-    if actual_number is None or estimate_number is None:
-        return "⚪", "Not available"
-
-    if actual_number > estimate_number:
-        return "✅", "Beat"
-
-    if actual_number < estimate_number:
-        return "❌", "Miss"
-
-    return "➖", "Inline"
-
-
 def reporting_session(hour: Any) -> str:
     normalized = str(hour or "").strip().lower()
 
@@ -328,15 +350,6 @@ def reporting_session(hour: Any) -> str:
     return labels.get(
         normalized,
         "Reporting Time Not Confirmed",
-    )
-
-
-def get_quote(symbol: str) -> dict[str, Any]:
-    return finnhub_get(
-        "/quote",
-        {
-            "symbol": symbol,
-        },
     )
 
 
@@ -360,7 +373,7 @@ def get_completed_reports(
     if not isinstance(reports, list):
         return []
 
-    completed_reports = []
+    completed_reports: list[dict[str, Any]] = []
 
     for report in reports:
         if not isinstance(report, dict):
@@ -373,30 +386,47 @@ def get_completed_reports(
         if not symbol:
             continue
 
-        has_eps_result = (
+        has_eps = (
             safe_number(report.get("epsActual"))
             is not None
         )
 
-        has_revenue_result = (
+        has_revenue = (
             safe_number(report.get("revenueActual"))
             is not None
         )
 
-        if not has_eps_result and not has_revenue_result:
+        if not has_eps and not has_revenue:
             continue
 
+        report["symbol"] = symbol
         completed_reports.append(report)
 
     return completed_reports
 
 
-def should_review_quote(
+def movement_score(move_percent: float) -> float:
+    absolute_move = abs(move_percent)
+
+    score = absolute_move * 5
+
+    if absolute_move >= 20:
+        score += 35
+    elif absolute_move >= 15:
+        score += 25
+    elif absolute_move >= 10:
+        score += 15
+    elif absolute_move >= 7:
+        score += 8
+
+    return score
+
+
+def calculate_candidate(
     report: dict[str, Any],
-) -> bool:
-    symbol = str(
-        report.get("symbol") or ""
-    ).upper()
+    quote: dict[str, Any],
+) -> dict[str, Any]:
+    symbol = str(report["symbol"]).upper()
 
     eps_surprise = surprise_percent(
         report.get("epsActual"),
@@ -408,90 +438,169 @@ def should_review_quote(
         report.get("revenueEstimate"),
     )
 
-    minimum_eps_surprise = env_float(
-        "EARNINGS_MIN_EPS_SURPRISE_PCT",
-        10,
-    )
-
-    minimum_revenue_surprise = env_float(
-        "EARNINGS_MIN_REVENUE_SURPRISE_PCT",
-        5,
-    )
-
-    return any(
-        (
-            symbol in PRIORITY_TICKERS,
-            (
-                eps_surprise is not None
-                and abs(eps_surprise)
-                >= minimum_eps_surprise
-            ),
-            (
-                revenue_surprise is not None
-                and abs(revenue_surprise)
-                >= minimum_revenue_surprise
-            ),
-        )
-    )
-
-
-def should_post(
-    report: dict[str, Any],
-    quote: dict[str, Any],
-) -> bool:
-    if should_review_quote(report):
-        return True
-
-    price_move = safe_number(
-        quote.get("dp")
-    )
-
-    minimum_price_move = env_float(
-        "EARNINGS_MIN_PRICE_MOVE_PCT",
-        8,
-    )
-
-    return (
-        price_move is not None
-        and abs(price_move) >= minimum_price_move
-    )
-
-
-def build_message(
-    report: dict[str, Any],
-    quote: dict[str, Any],
-) -> str:
-    symbol = str(
-        report.get("symbol") or ""
-    ).upper()
-
-    eps_icon, eps_result = result_label(
+    eps_direction = result_direction(
         report.get("epsActual"),
         report.get("epsEstimate"),
     )
 
-    revenue_icon, revenue_result = result_label(
+    revenue_direction = result_direction(
         report.get("revenueActual"),
         report.get("revenueEstimate"),
     )
 
-    eps_surprise = surprise_percent(
-        report.get("epsActual"),
-        report.get("epsEstimate"),
-    )
-
-    revenue_surprise = surprise_percent(
-        report.get("revenueActual"),
-        report.get("revenueEstimate"),
-    )
-
-    price_move = safe_number(
+    move_percent = safe_number(
         quote.get("dp")
     )
 
     current_price = safe_number(
         quote.get("c")
     )
+
+    score = 0.0
+
+    if move_percent is not None:
+        score += movement_score(move_percent)
+
+    if symbol in PRIORITY_TICKERS:
+        score += 30
+
+    if eps_direction == revenue_direction:
+        if eps_direction in {"beat", "miss"}:
+            score += 8
+
+    if (
+        eps_surprise is not None
+        and abs(eps_surprise) >= 50
+    ):
+        score += 5
+
+    if (
+        revenue_surprise is not None
+        and abs(revenue_surprise) >= 15
+    ):
+        score += 10
+
+    return {
+        "report": report,
+        "quote": quote,
+        "symbol": symbol,
+        "move_percent": move_percent,
+        "current_price": current_price,
+        "eps_surprise": eps_surprise,
+        "revenue_surprise": revenue_surprise,
+        "eps_direction": eps_direction,
+        "revenue_direction": revenue_direction,
+        "priority": symbol in PRIORITY_TICKERS,
+        "score": score,
+    }
+
+
+def qualifies_for_private(
+    candidate: dict[str, Any],
+) -> bool:
+    move_percent = candidate["move_percent"]
+
+    if move_percent is None:
+        return False
+
+    absolute_move = abs(move_percent)
+
+    private_move = env_float(
+        "EARNINGS_PRIVATE_MOVE_PCT",
+        5,
+    )
+
+    priority_private_move = env_float(
+        "EARNINGS_PRIORITY_PRIVATE_MOVE_PCT",
+        3,
+    )
+
+    if absolute_move >= private_move:
+        return True
+
+    if (
+        candidate["priority"]
+        and absolute_move >= priority_private_move
+    ):
+        return True
+
+    extreme_eps = (
+        candidate["eps_surprise"] is not None
+        and abs(candidate["eps_surprise"]) >= 75
+    )
+
+    extreme_revenue = (
+        candidate["revenue_surprise"] is not None
+        and abs(candidate["revenue_surprise"]) >= 20
+    )
+
+    return (
+        absolute_move >= 2
+        and (extreme_eps or extreme_revenue)
+    )
+
+
+def qualifies_for_public(
+    candidate: dict[str, Any],
+) -> bool:
+    move_percent = candidate["move_percent"]
+
+    if move_percent is None:
+        return False
+
+    absolute_move = abs(move_percent)
+
+    public_move = env_float(
+        "EARNINGS_PUBLIC_MOVE_PCT",
+        8,
+    )
+
+    priority_public_move = env_float(
+        "EARNINGS_PRIORITY_PUBLIC_MOVE_PCT",
+        5,
+    )
+
+    if absolute_move >= public_move:
+        return True
+
+    return (
+        candidate["priority"]
+        and absolute_move >= priority_public_move
+    )
+
+
+def result_icon(direction: str) -> str:
+    icons = {
+        "beat": "✅",
+        "miss": "❌",
+        "inline": "➖",
+        "unknown": "⚪",
+    }
+
+    return icons.get(direction, "⚪")
+
+
+def result_label(direction: str) -> str:
+    labels = {
+        "beat": "Beat",
+        "miss": "Miss",
+        "inline": "Inline",
+        "unknown": "Not available",
+    }
+
+    return labels.get(direction, "Not available")
+
+
+def build_public_message(
+    candidate: dict[str, Any],
+) -> str:
+    report = candidate["report"]
+    symbol = candidate["symbol"]
+    move_percent = candidate["move_percent"]
+    current_price = candidate["current_price"]
+
+    eps_surprise = candidate["eps_surprise"]
+    revenue_surprise = candidate["revenue_surprise"]
 
     eps_surprise_text = (
         f" ({eps_surprise:+.1f}%)"
@@ -505,72 +614,95 @@ def build_message(
         else ""
     )
 
-    if price_move is None:
-        move_line = "Latest move: **Not available**"
-    else:
-        move_icon = "🟢" if price_move >= 0 else "🔴"
+    move_icon = "🟢" if move_percent >= 0 else "🔴"
 
-        if current_price is None:
-            move_line = (
-                f"{move_icon} Latest move: "
-                f"**{price_move:+.2f}%**"
-            )
-        else:
-            move_line = (
-                f"{move_icon} Latest move: "
-                f"**{price_move:+.2f}%** "
-                f"at **${current_price:,.2f}**"
-            )
+    price_text = (
+        f" at **${current_price:,.2f}**"
+        if current_price is not None
+        else ""
+    )
 
-    lines = [
-        "# 💰 Earnings Reaction",
-        "",
-        f"## {symbol}",
-        "",
-        (
-            f"{eps_icon} **EPS: {eps_result}**"
-            f"{eps_surprise_text}"
-        ),
-        (
-            f"Actual: **{format_eps(report.get('epsActual'))}** "
-            f"| Estimate: "
-            f"**{format_eps(report.get('epsEstimate'))}**"
-        ),
-        "",
-        (
-            f"{revenue_icon} "
-            f"**Revenue: {revenue_result}**"
-            f"{revenue_surprise_text}"
-        ),
-        (
-            f"Actual: "
-            f"**{format_revenue(report.get('revenueActual'))}** "
-            f"| Estimate: "
-            f"**{format_revenue(report.get('revenueEstimate'))}**"
-        ),
-        "",
-        move_line,
-        "",
-        (
-            f"🕒 **Session:** "
-            f"{reporting_session(report.get('hour'))}"
-        ),
-        "",
-        DIVIDER,
-        "",
-        "*Earnings figures are reported data, not a trade signal.*",
-    ]
+    return "\n".join(
+        [
+            "# 💰 Earnings Reaction",
+            "",
+            f"## {symbol}",
+            "",
+            (
+                f"{move_icon} **Price reaction: "
+                f"{move_percent:+.2f}%**{price_text}"
+            ),
+            "",
+            (
+                f"{result_icon(candidate['eps_direction'])} "
+                f"**EPS: "
+                f"{result_label(candidate['eps_direction'])}**"
+                f"{eps_surprise_text}"
+            ),
+            (
+                f"Actual: **{format_eps(report.get('epsActual'))}** "
+                f"| Estimate: "
+                f"**{format_eps(report.get('epsEstimate'))}**"
+            ),
+            "",
+            (
+                f"{result_icon(candidate['revenue_direction'])} "
+                f"**Revenue: "
+                f"{result_label(candidate['revenue_direction'])}**"
+                f"{revenue_surprise_text}"
+            ),
+            (
+                f"Actual: "
+                f"**{format_revenue(report.get('revenueActual'))}** "
+                f"| Estimate: "
+                f"**{format_revenue(report.get('revenueEstimate'))}**"
+            ),
+            "",
+            (
+                f"🕒 **Session:** "
+                f"{reporting_session(report.get('hour'))}"
+            ),
+            "",
+            DIVIDER,
+            "",
+            "*Reported earnings data — not a trade signal.*",
+        ]
+    )
 
-    return "\n".join(lines)
+
+def build_private_message(
+    candidate: dict[str, Any],
+    rank: int,
+) -> str:
+    public_message = build_public_message(candidate)
+
+    symbol = candidate["symbol"]
+    tradingview_url = (
+        "https://www.tradingview.com/chart/"
+        f"?symbol={urllib.parse.quote(symbol)}"
+    )
+
+    return "\n".join(
+        [
+            f"# 🔬 Earnings Review #{rank}",
+            "",
+            public_message,
+            "",
+            f"**Review score:** {candidate['score']:.1f}",
+            "",
+            f"📈 Open in TradingView: {tradingview_url}",
+        ]
+    )
 
 
 def send_discord_message(
     webhook_url: str,
     message: str,
+    username: str,
 ) -> None:
     payload = json.dumps(
         {
-            "username": WEBHOOK_USERNAME,
+            "username": username,
             "content": message,
             "allowed_mentions": {
                 "parse": [],
@@ -595,8 +727,7 @@ def send_discord_message(
         ) as response:
             if response.status not in (200, 204):
                 raise RuntimeError(
-                    "Discord returned HTTP "
-                    f"{response.status}."
+                    f"Discord returned HTTP {response.status}."
                 )
 
     except urllib.error.HTTPError as exc:
@@ -610,131 +741,313 @@ def send_discord_message(
         ) from exc
 
 
+def load_state() -> dict[str, Any]:
+    if not STATE_FILE.exists():
+        return {
+            "public": {},
+            "private": {},
+        }
+
+    try:
+        state = json.loads(
+            STATE_FILE.read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return {
+            "public": {},
+            "private": {},
+        }
+
+    state.setdefault("public", {})
+    state.setdefault("private", {})
+
+    return state
+
+
+def save_state(state: dict[str, Any]) -> None:
+    STATE_FILE.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    temporary_file = STATE_FILE.with_suffix(".tmp")
+
+    temporary_file.write_text(
+        json.dumps(
+            state,
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    temporary_file.replace(STATE_FILE)
+
+
 def report_key(
     report: dict[str, Any],
 ) -> str:
     return ":".join(
-        (
+        [
             str(report.get("date") or ""),
             str(report.get("symbol") or "").upper(),
             str(report.get("year") or ""),
             str(report.get("quarter") or ""),
-        )
+        ]
     )
+
+
+def print_preview_list(
+    title: str,
+    candidates: list[dict[str, Any]],
+    limit: int,
+) -> None:
+    print()
+    print(title)
+    print("=" * len(title))
+
+    if not candidates:
+        print("No qualifying candidates.")
+        return
+
+    for rank, candidate in enumerate(
+        candidates[:limit],
+        start=1,
+    ):
+        move = candidate["move_percent"]
+
+        print(
+            f"{rank:>2}. "
+            f"{candidate['symbol']:<7} "
+            f"{move:+7.2f}%  "
+            f"Score {candidate['score']:>7.1f}"
+        )
+
+    if len(candidates) > limit:
+        print(
+            f"... plus {len(candidates) - limit} more."
+        )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Post completed earnings reactions to Discord."
+            "Create ranked public and private earnings feeds."
         )
     )
 
     parser.add_argument(
         "--date",
-        help="Target date in YYYY-MM-DD format. Defaults to today ET.",
+        help=(
+            "Target date in YYYY-MM-DD format. "
+            "Defaults to today Eastern."
+        ),
     )
 
     parser.add_argument(
         "--preview",
         action="store_true",
-        help="Print messages without posting to Discord.",
+        help="Preview rankings without posting to Discord.",
+    )
+
+    parser.add_argument(
+        "--preview-limit",
+        type=int,
+        default=20,
+        help="Maximum candidates shown in each preview list.",
     )
 
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Ignore saved state and process reports again.",
+        help="Ignore saved posting state.",
     )
 
     arguments = parser.parse_args()
 
+    today_eastern = datetime.now(EASTERN).date().isoformat()
+
     target_date = (
         arguments.date
-        or datetime.now(EASTERN).date().isoformat()
+        or today_eastern
     )
 
-    webhook_url = ""
-
-    if not arguments.preview:
-        webhook_url = required_env(
-            "EARNINGS_REACTIONS_WEBHOOK"
+    if target_date != today_eastern:
+        print(
+            "WARNING: Finnhub quote movement is current, "
+            "not historical. Historical date testing validates "
+            "filtering and formatting only."
         )
 
-    state = load_state()
-    posted = state["posted"]
+    reports = get_completed_reports(target_date)
 
-    reports = get_completed_reports(
-        target_date
+    quote_delay = env_float(
+        "EARNINGS_QUOTE_DELAY_SECONDS",
+        1.1,
     )
 
-    reviewed_count = 0
-    posted_count = 0
-    skipped_count = 0
+    candidates: list[dict[str, Any]] = []
 
-    for report in reports:
-        key = report_key(report)
+    for index, report in enumerate(reports, start=1):
+        symbol = str(report["symbol"])
 
-        if key in posted and not arguments.force:
-            skipped_count += 1
-            continue
-
-        # Finnhub quote data is requested only for completed
-        # reports to keep API usage controlled.
-        symbol = str(
-            report.get("symbol") or ""
-        ).upper()
+        print(
+            f"Retrieving quote {index}/{len(reports)}: "
+            f"{symbol}"
+        )
 
         try:
-            quote = get_quote(symbol)
+            quote = get_quote_with_retry(symbol)
         except RuntimeError as exc:
             print(
                 f"Could not retrieve quote for {symbol}: {exc}"
             )
             quote = {}
 
-        reviewed_count += 1
-
-        if not should_post(report, quote):
-            skipped_count += 1
-            continue
-
-        message = build_message(
+        candidate = calculate_candidate(
             report,
             quote,
         )
 
-        if arguments.preview:
-            print(message)
-            print("\n" + "=" * 70 + "\n")
-        else:
+        candidates.append(candidate)
+
+        if index < len(reports):
+            time.sleep(quote_delay)
+
+    private_candidates = sorted(
+        [
+            candidate
+            for candidate in candidates
+            if qualifies_for_private(candidate)
+        ],
+        key=lambda item: (
+            item["score"],
+            abs(item["move_percent"] or 0),
+        ),
+        reverse=True,
+    )
+
+    public_candidates = sorted(
+        [
+            candidate
+            for candidate in private_candidates
+            if qualifies_for_public(candidate)
+        ],
+        key=lambda item: (
+            item["score"],
+            abs(item["move_percent"] or 0),
+        ),
+        reverse=True,
+    )
+
+    private_max = env_int(
+        "EARNINGS_PRIVATE_MAX",
+        50,
+    )
+
+    public_max = env_int(
+        "EARNINGS_PUBLIC_MAX",
+        15,
+    )
+
+    private_candidates = private_candidates[:private_max]
+    public_candidates = public_candidates[:public_max]
+
+    if arguments.preview:
+        print_preview_list(
+            "PRIVATE EARNINGS REVIEW",
+            private_candidates,
+            arguments.preview_limit,
+        )
+
+        print_preview_list(
+            "PUBLIC EARNINGS REACTIONS",
+            public_candidates,
+            arguments.preview_limit,
+        )
+
+        print()
+        print(
+            f"Completed reports: {len(reports)} | "
+            f"Private review: {len(private_candidates)} | "
+            f"Public reactions: {len(public_candidates)}"
+        )
+
+        return
+
+    public_webhook = required_env(
+        "EARNINGS_REACTIONS_WEBHOOK"
+    )
+
+    private_webhook = os.getenv(
+        "EARNINGS_REVIEW_WEBHOOK",
+        "",
+    ).strip()
+
+    state = load_state()
+
+    private_posted = 0
+    public_posted = 0
+
+    if private_webhook:
+        for rank, candidate in enumerate(
+            private_candidates,
+            start=1,
+        ):
+            key = report_key(candidate["report"])
+
+            if (
+                key in state["private"]
+                and not arguments.force
+            ):
+                continue
+
             send_discord_message(
-                webhook_url,
-                message,
+                private_webhook,
+                build_private_message(candidate, rank),
+                PRIVATE_WEBHOOK_USERNAME,
             )
 
-            posted[key] = {
-                "posted_at": datetime.now(
-                    EASTERN
-                ).isoformat(),
-                "symbol": symbol,
+            state["private"][key] = {
+                "posted_at": datetime.now(EASTERN).isoformat(),
+                "symbol": candidate["symbol"],
             }
 
             save_state(state)
-
-            # Prevent rapid webhook/API bursts.
+            private_posted += 1
             time.sleep(1)
 
-        posted_count += 1
+    for candidate in public_candidates:
+        key = report_key(candidate["report"])
 
-    mode = "previewed" if arguments.preview else "posted"
+        if (
+            key in state["public"]
+            and not arguments.force
+        ):
+            continue
+
+        send_discord_message(
+            public_webhook,
+            build_public_message(candidate),
+            PUBLIC_WEBHOOK_USERNAME,
+        )
+
+        state["public"][key] = {
+            "posted_at": datetime.now(EASTERN).isoformat(),
+            "symbol": candidate["symbol"],
+        }
+
+        save_state(state)
+        public_posted += 1
+        time.sleep(1)
 
     print(
-        f"Earnings reactions complete for {target_date}: "
-        f"{len(reports)} completed report(s), "
-        f"{reviewed_count} reviewed, "
-        f"{posted_count} {mode}, "
-        f"{skipped_count} skipped."
+        f"Earnings run complete for {target_date}: "
+        f"{len(reports)} completed, "
+        f"{len(private_candidates)} private candidates, "
+        f"{len(public_candidates)} public candidates, "
+        f"{private_posted} private posted, "
+        f"{public_posted} public posted."
     )
 
 
