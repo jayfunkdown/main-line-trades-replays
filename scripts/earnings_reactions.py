@@ -88,6 +88,8 @@ DIVIDER = "━━━━━━━━━━━━━━━━━━━━━━━
 
 MAX_DISCORD_ATTEMPTS = 4
 DISCORD_POST_DELAY_SECONDS = 1.5
+DISCORD_BULK_DELETE_LIMIT = 100
+DISCORD_BULK_DELETE_SAFE_AGE = timedelta(days=13, hours=23)
 DISCORD_API_BASE = "https://discord.com/api/v10"
 YAHOO_CHART_BASE = "https://query1.finance.yahoo.com/v8/finance/chart"
 WEEKLY_CHART_WEEKS = 52
@@ -1692,6 +1694,165 @@ def find_signal_item_by_review_message(
     return None
 
 
+def handled_review_message_ids(
+    state: dict[str, Any],
+    review_channel_id: int,
+) -> list[int]:
+    """Return unique handled review IDs for the configured channel."""
+    signal_queue = state.get("signal_queue")
+
+    if not isinstance(signal_queue, dict):
+        return []
+
+    message_ids: list[int] = []
+    seen: set[int] = set()
+
+    for item in signal_queue.values():
+        if not isinstance(item, dict):
+            continue
+
+        if item.get("sent_to_signals") is not True:
+            continue
+
+        if str(item.get("review_channel_id") or "") != str(
+            review_channel_id
+        ):
+            continue
+
+        raw_message_id = str(
+            item.get("review_message_id") or ""
+        ).strip()
+
+        if not raw_message_id.isdigit():
+            continue
+
+        message_id = int(raw_message_id)
+
+        if message_id not in seen:
+            seen.add(message_id)
+            message_ids.append(message_id)
+
+    return message_ids
+
+
+def can_clear_earnings_review(
+    user: Any,
+    guild: Any,
+) -> bool:
+    """Authorize the guild owner or a member with moderation rights."""
+    if user is None or guild is None:
+        return False
+
+    if str(getattr(guild, "owner_id", "")) == str(
+        getattr(user, "id", "")
+    ):
+        return True
+
+    permissions = getattr(user, "guild_permissions", None)
+
+    if permissions is None:
+        return False
+
+    return bool(
+        getattr(permissions, "administrator", False)
+        or getattr(permissions, "manage_messages", False)
+    )
+
+
+def is_configured_review_channel(
+    channel_id: Any,
+    review_channel_id: int,
+) -> bool:
+    return str(channel_id or "") == str(review_channel_id)
+
+
+def is_safe_review_message(
+    message: Any,
+    bot_user_id: int,
+    normal_message_type: Any,
+) -> bool:
+    """Apply Discord-message safeguards after state provenance checks."""
+    author = getattr(message, "author", None)
+
+    return bool(
+        author is not None
+        and str(getattr(author, "id", "")) == str(bot_user_id)
+        and not getattr(message, "pinned", False)
+        and getattr(message, "type", None) == normal_message_type
+    )
+
+
+def partition_review_messages_for_deletion(
+    messages: list[Any],
+    now_utc: datetime,
+) -> tuple[list[Any], list[Any]]:
+    """Separate safely bulk-deletable messages from older messages."""
+    bulk_cutoff = now_utc - DISCORD_BULK_DELETE_SAFE_AGE
+    recent: list[Any] = []
+    individual: list[Any] = []
+
+    for message in messages:
+        created_at = getattr(message, "created_at", None)
+
+        if created_at is not None and created_at > bulk_cutoff:
+            recent.append(message)
+        else:
+            individual.append(message)
+
+    return recent, individual
+
+
+async def delete_review_messages_safely(
+    channel: Any,
+    messages: list[Any],
+    *,
+    now_utc: datetime,
+    http_error_types: tuple[type[BaseException], ...],
+    not_found_type: type[BaseException],
+) -> dict[str, int]:
+    """Bulk-delete recent messages and individually delete older ones."""
+    recent, individual = partition_review_messages_for_deletion(
+        messages,
+        now_utc,
+    )
+
+    deleted = 0
+    missing = 0
+    failed = 0
+
+    for start in range(0, len(recent), DISCORD_BULK_DELETE_LIMIT):
+        batch = recent[
+            start:start + DISCORD_BULK_DELETE_LIMIT
+        ]
+
+        if len(batch) < 2:
+            individual.extend(batch)
+            continue
+
+        try:
+            await channel.delete_messages(batch)
+        except http_error_types:
+            individual.extend(batch)
+        else:
+            deleted += len(batch)
+
+    for message in individual:
+        try:
+            await message.delete()
+        except not_found_type:
+            missing += 1
+        except http_error_types:
+            failed += 1
+        else:
+            deleted += 1
+
+    return {
+        "deleted": deleted,
+        "missing": missing,
+        "failed": failed,
+    }
+
+
 def pending_signal_for_user(
     state: dict[str, Any],
     user_id: str,
@@ -1759,6 +1920,8 @@ async def run_review_button_bot() -> None:
 
     intents = discord.Intents.default()
     client = discord.Client(intents=intents)
+    command_tree = discord.app_commands.CommandTree(client)
+    command_sync_attempted = False
 
     async def get_bot_log_channel():
         """
@@ -2234,8 +2397,138 @@ async def run_review_button_bot() -> None:
                 )
                 raise
 
+    @command_tree.command(
+        name="clear-earnings-review",
+        description="Clear handled bot posts from earnings review.",
+    )
+    @discord.app_commands.guild_only()
+    @discord.app_commands.default_permissions(
+        manage_messages=True,
+    )
+    async def clear_earnings_review(
+        interaction: discord.Interaction,
+    ) -> None:
+        if not can_clear_earnings_review(
+            interaction.user,
+            interaction.guild,
+        ):
+            await interaction.response.send_message(
+                (
+                    "You need server owner, Administrator, or "
+                    "Manage Messages permission to use this command."
+                ),
+                ephemeral=True,
+            )
+            return
+
+        if not is_configured_review_channel(
+            interaction.channel_id,
+            review_channel_id,
+        ):
+            await interaction.response.send_message(
+                "This command only works in the earnings-review channel.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(
+            ephemeral=True,
+            thinking=True,
+        )
+
+        state = load_state()
+        message_ids = handled_review_message_ids(
+            state,
+            review_channel_id,
+        )
+
+        review_channel = client.get_channel(
+            review_channel_id
+        )
+
+        if review_channel is None:
+            try:
+                review_channel = await client.fetch_channel(
+                    review_channel_id
+                )
+            except (discord.Forbidden, discord.HTTPException):
+                await interaction.followup.send(
+                    "I could not access the earnings-review channel.",
+                    ephemeral=True,
+                )
+                return
+
+        candidates: list[Any] = []
+        skipped = 0
+        fetch_failed = 0
+
+        for message_id in message_ids:
+            try:
+                message = await review_channel.fetch_message(
+                    message_id
+                )
+            except discord.NotFound:
+                skipped += 1
+                continue
+            except (discord.Forbidden, discord.HTTPException):
+                fetch_failed += 1
+                continue
+
+            if not is_safe_review_message(
+                message,
+                client.user.id,
+                discord.MessageType.default,
+            ):
+                skipped += 1
+                continue
+
+            candidates.append(message)
+
+        results = await delete_review_messages_safely(
+            review_channel,
+            candidates,
+            now_utc=datetime.now(timezone.utc),
+            http_error_types=(
+                discord.Forbidden,
+                discord.HTTPException,
+            ),
+            not_found_type=discord.NotFound,
+        )
+
+        total_skipped = skipped + results["missing"]
+        total_failed = fetch_failed + results["failed"]
+
+        await interaction.followup.send(
+            (
+                f"Deleted {results['deleted']} handled earnings "
+                f"review message(s). Skipped {total_skipped}; "
+                f"failed {total_failed}."
+            ),
+            ephemeral=True,
+        )
+
     @client.event
     async def on_ready():
+        nonlocal command_sync_attempted
+
+        if not command_sync_attempted:
+            command_sync_attempted = True
+
+            try:
+                synced_commands = await command_tree.sync()
+            except Exception as exc:
+                print(
+                    "Could not sync Earnings Review slash commands:",
+                    repr(exc),
+                    flush=True,
+                )
+            else:
+                print(
+                    f"Synced {len(synced_commands)} Earnings Review "
+                    "slash command(s).",
+                    flush=True,
+                )
+
         print(
             "Earnings Review workflow bot connected as "
             f"{client.user}."
