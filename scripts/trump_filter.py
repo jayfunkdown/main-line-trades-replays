@@ -29,6 +29,7 @@ DEFAULT_MAX_NEW_MESSAGES = 10
 MAX_STATE_IDS = 500
 POST_DELAY_SECONDS = 2.0
 MAX_POST_ATTEMPTS = 4
+DISCORD_CONTENT_LIMIT = 2000
 
 IMAGE_EXTENSIONS = (
     ".png",
@@ -691,6 +692,7 @@ def main() -> int:
     posted = 0
     previewed = 0
     skipped_empty = 0
+    skipped_oversized = 0
 
     for message in messages:
         message_id = str(message["id"])
@@ -739,6 +741,23 @@ def main() -> int:
             cleaned_text,
             original_url,
         )
+
+        if len(public_message) > DISCORD_CONTENT_LIMIT:
+            skipped_oversized += 1
+
+            if args.post:
+                mark_processed(
+                    message_id,
+                    processed_ids,
+                    processed_set,
+                )
+
+            print(
+                f"Skipped message {message_id}: content is "
+                f"{len(public_message)} characters; Discord's "
+                f"limit is {DISCORD_CONTENT_LIMIT}."
+            )
+            continue
 
         if args.preview:
             previewed += 1
@@ -791,7 +810,8 @@ def main() -> int:
     print(
         f"Finished. Checked {checked}, "
         f"{action_text}, and skipped "
-        f"{skipped_empty} empty item(s)."
+        f"{skipped_empty} empty and "
+        f"{skipped_oversized} oversized item(s)."
     )
 
     if args.preview:
