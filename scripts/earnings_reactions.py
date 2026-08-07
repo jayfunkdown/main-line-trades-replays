@@ -1694,47 +1694,6 @@ def find_signal_item_by_review_message(
     return None
 
 
-def handled_review_message_ids(
-    state: dict[str, Any],
-    review_channel_id: int,
-) -> list[int]:
-    """Return unique handled review IDs for the configured channel."""
-    signal_queue = state.get("signal_queue")
-
-    if not isinstance(signal_queue, dict):
-        return []
-
-    message_ids: list[int] = []
-    seen: set[int] = set()
-
-    for item in signal_queue.values():
-        if not isinstance(item, dict):
-            continue
-
-        if item.get("sent_to_signals") is not True:
-            continue
-
-        if str(item.get("review_channel_id") or "") != str(
-            review_channel_id
-        ):
-            continue
-
-        raw_message_id = str(
-            item.get("review_message_id") or ""
-        ).strip()
-
-        if not raw_message_id.isdigit():
-            continue
-
-        message_id = int(raw_message_id)
-
-        if message_id not in seen:
-            seen.add(message_id)
-            message_ids.append(message_id)
-
-    return message_ids
-
-
 def can_clear_earnings_review(
     user: Any,
     guild: Any,
@@ -1780,6 +1739,28 @@ def is_safe_review_message(
         and not getattr(message, "pinned", False)
         and getattr(message, "type", None) == normal_message_type
     )
+
+
+async def collect_safe_review_messages(
+    channel: Any,
+    bot_user_id: int,
+    normal_message_type: Any,
+) -> tuple[list[Any], int]:
+    """Collect bot-authored, normal, unpinned messages in the channel."""
+    candidates: list[Any] = []
+    skipped = 0
+
+    async for message in channel.history(limit=None):
+        if is_safe_review_message(
+            message,
+            bot_user_id,
+            normal_message_type,
+        ):
+            candidates.append(message)
+        else:
+            skipped += 1
+
+    return candidates, skipped
 
 
 def partition_review_messages_for_deletion(
@@ -2399,7 +2380,7 @@ async def run_review_button_bot() -> None:
 
     @command_tree.command(
         name="clear-earnings-review",
-        description="Clear handled bot posts from earnings review.",
+        description="Clear bot posts from earnings review.",
     )
     @discord.app_commands.guild_only()
     @discord.app_commands.default_permissions(
@@ -2436,12 +2417,6 @@ async def run_review_button_bot() -> None:
             thinking=True,
         )
 
-        state = load_state()
-        message_ids = handled_review_message_ids(
-            state,
-            review_channel_id,
-        )
-
         review_channel = client.get_channel(
             review_channel_id
         )
@@ -2458,31 +2433,18 @@ async def run_review_button_bot() -> None:
                 )
                 return
 
-        candidates: list[Any] = []
-        skipped = 0
-        fetch_failed = 0
-
-        for message_id in message_ids:
-            try:
-                message = await review_channel.fetch_message(
-                    message_id
-                )
-            except discord.NotFound:
-                skipped += 1
-                continue
-            except (discord.Forbidden, discord.HTTPException):
-                fetch_failed += 1
-                continue
-
-            if not is_safe_review_message(
-                message,
+        try:
+            candidates, skipped = await collect_safe_review_messages(
+                review_channel,
                 client.user.id,
                 discord.MessageType.default,
-            ):
-                skipped += 1
-                continue
-
-            candidates.append(message)
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            await interaction.followup.send(
+                "I could not read the earnings-review channel history.",
+                ephemeral=True,
+            )
+            return
 
         results = await delete_review_messages_safely(
             review_channel,
@@ -2496,13 +2458,12 @@ async def run_review_button_bot() -> None:
         )
 
         total_skipped = skipped + results["missing"]
-        total_failed = fetch_failed + results["failed"]
 
         await interaction.followup.send(
             (
-                f"Deleted {results['deleted']} handled earnings "
+                f"Deleted {results['deleted']} earnings "
                 f"review message(s). Skipped {total_skipped}; "
-                f"failed {total_failed}."
+                f"failed {results['failed']}."
             ),
             ephemeral=True,
         )

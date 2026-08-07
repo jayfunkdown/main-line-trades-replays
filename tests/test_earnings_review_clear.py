@@ -1,4 +1,3 @@
-import copy
 import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -40,9 +39,16 @@ class FakeMessage:
 
 
 class FakeChannel:
-    def __init__(self, bulk_error=None):
+    def __init__(self, bulk_error=None, messages=None):
         self.bulk_error = bulk_error
         self.bulk_calls = []
+        self.messages = list(messages or [])
+
+    async def history(self, *, limit):
+        if limit is not None:
+            raise AssertionError("Review history must not be limited")
+        for message in self.messages:
+            yield message
 
     async def delete_messages(self, messages):
         self.bulk_calls.append(list(messages))
@@ -51,40 +57,6 @@ class FakeChannel:
 
 
 class ReviewSelectionTests(unittest.TestCase):
-    def test_selects_only_handled_messages_for_configured_channel(self):
-        state = {
-            "signal_queue": {
-                "handled": {
-                    "review_message_id": "101",
-                    "review_channel_id": "500",
-                    "sent_to_signals": True,
-                },
-                "unhandled": {
-                    "review_message_id": "102",
-                    "review_channel_id": "500",
-                    "sent_to_signals": False,
-                },
-                "wrong_channel": {
-                    "review_message_id": "103",
-                    "review_channel_id": "501",
-                    "sent_to_signals": True,
-                },
-                "missing_id": {
-                    "review_channel_id": "500",
-                    "sent_to_signals": True,
-                },
-            }
-        }
-        original_state = copy.deepcopy(state)
-
-        result = earnings_reactions.handled_review_message_ids(
-            state,
-            500,
-        )
-
-        self.assertEqual(result, [101])
-        self.assertEqual(state, original_state)
-
     def test_channel_check_requires_exact_configured_channel(self):
         self.assertTrue(
             earnings_reactions.is_configured_review_channel("500", 500)
@@ -190,6 +162,32 @@ class MessageSafetyTests(unittest.TestCase):
 
 
 class DeletionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_collects_only_current_bot_normal_unpinned_messages(self):
+        now = datetime.now(timezone.utc)
+        valid = FakeMessage(101, created_at=now)
+        human = FakeMessage(102, created_at=now, author_id=50)
+        other_bot = FakeMessage(103, created_at=now, author_id=100)
+        pinned = FakeMessage(104, created_at=now, pinned=True)
+        system = FakeMessage(
+            105,
+            created_at=now,
+            message_type="system",
+        )
+        channel = FakeChannel(
+            messages=[valid, human, other_bot, pinned, system]
+        )
+
+        candidates, skipped = (
+            await earnings_reactions.collect_safe_review_messages(
+                channel,
+                99,
+                "default",
+            )
+        )
+
+        self.assertEqual(candidates, [valid])
+        self.assertEqual(skipped, 4)
+
     async def test_bulk_deletes_recent_and_individually_deletes_old(self):
         now = datetime.now(timezone.utc)
         recent = [
