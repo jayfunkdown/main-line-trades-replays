@@ -1,0 +1,2 @@
+deploy/systemd/*.service text eol=lf
+deploy/systemd/*.timer text eol=lf

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Main Line Trades Earnings at 6 AM Eastern
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 06:00:00 America/New_York
+Persistent=true
+Unit=mainline-earnings-post.service
+
+[Install]
+WantedBy=timers.target

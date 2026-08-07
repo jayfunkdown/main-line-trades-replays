@@ -1,0 +1,10 @@
+[Unit]
+Description=Check Main Line Trades YouTube Replays Every 5 Minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Unit=mainline-youtube-replays.service
+
+[Install]
+WantedBy=timers.target

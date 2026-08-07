@@ -1,0 +1,11 @@
+[Unit]
+Description=Main Line Trades Earnings Post Run
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=jason
+WorkingDirectory=/home/jason/main-line-trades-replays
+Environment=EARNINGS_EARLY_MORNING_CUTOFF_HOUR=7
+ExecStart=/home/jason/main-line-trades-replays/.venv/bin/python /home/jason/main-line-trades-replays/scripts/earnings_reactions.py --post

@@ -1,0 +1,10 @@
+[Unit]
+Description=Post Main Line Trades Morning Brief Weekdays at 6:30 AM ET
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 06:30:00 America/New_York
+Persistent=true
+Unit=mainline-morning-brief.service
+
+[Install]
+WantedBy=timers.target

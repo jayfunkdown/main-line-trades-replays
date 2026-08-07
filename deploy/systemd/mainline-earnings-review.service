@@ -1,0 +1,15 @@
+[Unit]
+Description=Main Line Trades Earnings Review Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jason
+WorkingDirectory=/home/jason/main-line-trades-replays
+ExecStart=/home/jason/main-line-trades-replays/.venv/bin/python /home/jason/main-line-trades-replays/scripts/earnings_reactions.py --review-bot
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

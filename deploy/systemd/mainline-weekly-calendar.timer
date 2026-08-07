@@ -1,0 +1,10 @@
+[Unit]
+Description=Post Main Line Trades Weekly Economic Calendar Monday at 6 AM ET
+
+[Timer]
+OnCalendar=Mon *-*-* 06:00:00 America/New_York
+Persistent=true
+Unit=mainline-weekly-calendar.service
+
+[Install]
+WantedBy=timers.target
