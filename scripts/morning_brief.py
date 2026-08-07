@@ -787,13 +787,7 @@ def build_earnings_group(
 
     if other:
         lines.append(
-            f"**Additional scheduled "
-            f"reports ({len(other)}):**"
-        )
-        lines.append("")
-
-        lines.extend(
-            compact_ticker_lines(other)
+            f"*Plus {len(other)} additional scheduled reports.*"
         )
         lines.append("")
 
