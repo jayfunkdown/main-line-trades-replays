@@ -18,12 +18,14 @@ KNOWN_SECTIONS = (
     "private",
     "quotes",
     "signal_queue",
+    "manual_signal_drafts",
 )
 
 SAFETY_CRITICAL_SECTIONS = (
     "public",
     "private",
     "signal_queue",
+    "manual_signal_drafts",
 )
 
 T = TypeVar("T")

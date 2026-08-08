@@ -115,6 +115,24 @@ SIGNAL_DELIVERY_STATUSES = {
     SIGNAL_DELIVERY_UNKNOWN,
 }
 
+MANUAL_SIGNAL_READY = "ready"
+MANUAL_SIGNAL_SENDING = "sending"
+MANUAL_SIGNAL_SENT = "sent"
+MANUAL_SIGNAL_UNKNOWN = "unknown"
+MANUAL_SIGNAL_STATUSES = {
+    MANUAL_SIGNAL_READY,
+    MANUAL_SIGNAL_SENDING,
+    MANUAL_SIGNAL_SENT,
+    MANUAL_SIGNAL_UNKNOWN,
+}
+MANUAL_SIGNAL_MAX_CONTENT_LENGTH = 2000
+MANUAL_SIGNAL_IMAGE_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+}
+
 FEED_DELIVERY_RESERVED = "reserved"
 FEED_DELIVERY_CONFIRMED = "confirmed"
 FEED_DELIVERY_FAILED = "failed"
@@ -1787,6 +1805,379 @@ def build_signal_message(
     )
 
 
+def build_manual_signal_message(
+    instrument: str,
+    trade_thesis: str,
+    *,
+    timeframe: str = "",
+    setup_name: str = "",
+) -> str:
+    """Build the exact member-facing manual Signals message."""
+    lines = [
+        "# 📈 Trade Signal",
+        "",
+        f"## {instrument.strip()}",
+        "",
+    ]
+    if timeframe.strip():
+        lines.append(f"🕒 **Timeframe:** {timeframe.strip()}")
+    if setup_name.strip():
+        lines.append(f"🎯 **Setup:** {setup_name.strip()}")
+    if timeframe.strip() or setup_name.strip():
+        lines.append("")
+    lines.extend(
+        [
+            "## 🧠 Trade Thesis",
+            "",
+            trade_thesis.strip(),
+            "",
+            "---",
+            "",
+            "## 📊 Trade Chart",
+            "",
+            "*Chart and thesis provided by Main Line Trades.*",
+            "",
+            "⚠️ **Manage risk. This is not financial advice.**",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def is_valid_manual_signal_fields(
+    instrument: Any,
+    trade_thesis: Any,
+    timeframe: Any = "",
+    setup_name: Any = "",
+) -> bool:
+    if not isinstance(instrument, str) or not instrument.strip():
+        return False
+    if not isinstance(trade_thesis, str) or not trade_thesis.strip():
+        return False
+    if not isinstance(timeframe, str) or not isinstance(setup_name, str):
+        return False
+    content = build_manual_signal_message(
+        instrument,
+        trade_thesis,
+        timeframe=timeframe,
+        setup_name=setup_name,
+    )
+    return len(content) <= MANUAL_SIGNAL_MAX_CONTENT_LENGTH
+
+
+def is_valid_manual_chart_attachment(attachment: Any) -> bool:
+    filename = getattr(attachment, "filename", None)
+    content_type = getattr(attachment, "content_type", None)
+    if not isinstance(filename, str) or not filename.strip():
+        return False
+    suffix = Path(filename).suffix.lower()
+    expected_type = MANUAL_SIGNAL_IMAGE_TYPES.get(suffix)
+    if expected_type is None:
+        return False
+    return content_type in {None, "", expected_type}
+
+
+def manual_chart_metadata(attachment: Any) -> dict[str, str]:
+    return {
+        "filename": str(getattr(attachment, "filename", "")),
+        "content_type": str(getattr(attachment, "content_type", "") or ""),
+        "attachment_id": str(getattr(attachment, "id", "") or ""),
+    }
+
+
+def is_valid_manual_chart_metadata(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    filename = value.get("filename")
+    content_type = value.get("content_type")
+    if not isinstance(filename, str) or not filename.strip():
+        return False
+    if not isinstance(content_type, str):
+        return False
+    suffix = Path(filename).suffix.lower()
+    expected_type = MANUAL_SIGNAL_IMAGE_TYPES.get(suffix)
+    if expected_type is None or content_type not in {"", expected_type}:
+        return False
+    attachment_id = value.get("attachment_id", "")
+    return isinstance(attachment_id, str)
+
+
+def manual_chart_matches_record(attachment: Any, metadata: Any) -> bool:
+    if (
+        not is_valid_manual_chart_attachment(attachment)
+        or not is_valid_manual_chart_metadata(metadata)
+    ):
+        return False
+    return (
+        Path(attachment.filename).name == Path(metadata["filename"]).name
+        and str(getattr(attachment, "content_type", "") or "")
+        == metadata["content_type"]
+    )
+
+
+def manual_signal_delivery_status(record: Any) -> str | None:
+    """Validate a complete manual draft and return its delivery state."""
+    if not isinstance(record, dict):
+        return None
+    required_ids = (
+        "draft_message_id",
+        "draft_channel_id",
+        "creator_user_id",
+    )
+    if any(discord_id_text(record.get(field)) is None for field in required_ids):
+        return None
+    if not isinstance(record.get("draft_id"), str) or not record["draft_id"]:
+        return None
+    if not is_valid_manual_signal_fields(
+        record.get("instrument"),
+        record.get("trade_thesis"),
+        record.get("timeframe"),
+        record.get("setup_name"),
+    ):
+        return None
+    if not is_valid_manual_chart_metadata(record.get("chart")):
+        return None
+    if not isinstance(record.get("canceled"), bool):
+        return None
+    for field in ("created_at", "updated_at"):
+        if not isinstance(record.get(field), str) or parse_iso_datetime(
+            record[field]
+        ) is None:
+            return None
+    status = record.get("delivery_status")
+    if status not in MANUAL_SIGNAL_STATUSES:
+        return None
+    if status == MANUAL_SIGNAL_SENT and discord_id_text(
+        record.get("signals_message_id")
+    ) is None:
+        return None
+    return status
+
+
+def validated_manual_signal_draft(
+    state: dict[str, Any],
+    draft_id: Any,
+    message_id: Any,
+    channel_id: Any,
+    configured_channel_id: Any,
+) -> dict[str, Any] | None:
+    if not isinstance(state, dict) or not isinstance(draft_id, str):
+        return None
+    drafts = state.get("manual_signal_drafts")
+    if not isinstance(drafts, dict):
+        return None
+    record = drafts.get(draft_id)
+    if manual_signal_delivery_status(record) is None:
+        return None
+    expected_message_id = discord_id_text(message_id)
+    expected_channel_id = discord_id_text(channel_id)
+    if (
+        expected_message_id is None
+        or expected_channel_id is None
+        or expected_channel_id != discord_id_text(configured_channel_id)
+        or record["draft_message_id"] != expected_message_id
+        or record["draft_channel_id"] != expected_channel_id
+        or record["draft_id"] != draft_id
+    ):
+        return None
+    return record
+
+
+def find_manual_signal_draft_by_message(
+    state: dict[str, Any],
+    message_id: Any,
+) -> tuple[str, dict[str, Any]] | None:
+    expected = discord_id_text(message_id)
+    drafts = state.get("manual_signal_drafts") if isinstance(state, dict) else None
+    if expected is None or not isinstance(drafts, dict):
+        return None
+    matches = [
+        (draft_id, record)
+        for draft_id, record in drafts.items()
+        if isinstance(draft_id, str)
+        and isinstance(record, dict)
+        and record.get("draft_message_id") == expected
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def claim_manual_signal_delivery(
+    draft_id: str,
+    message_id: str,
+    channel_id: str,
+    attempt_id: str,
+    started_at: str,
+) -> tuple[dict[str, Any], str]:
+    outcome = "missing"
+
+    def mutation(state: dict[str, Any]) -> None:
+        nonlocal outcome
+        record = validated_manual_signal_draft(
+            state,
+            draft_id,
+            message_id,
+            channel_id,
+            channel_id,
+        )
+        if record is None:
+            outcome = "invalid"
+            return
+        status = manual_signal_delivery_status(record)
+        if record["canceled"]:
+            outcome = "canceled"
+            return
+        if status != MANUAL_SIGNAL_READY:
+            outcome = str(status or "invalid")
+            return
+        record["delivery_status"] = MANUAL_SIGNAL_SENDING
+        record["delivery_attempt_id"] = attempt_id
+        record["delivery_started_at"] = started_at
+        record["updated_at"] = started_at
+        record.pop("delivery_error", None)
+        record.pop("delivery_finished_at", None)
+        record.pop("signals_message_id", None)
+        outcome = "claimed"
+
+    return update_state(mutation), outcome
+
+
+def transition_manual_signal_delivery(
+    draft_id: str,
+    attempt_id: str,
+    status: str,
+    finished_at: str,
+    *,
+    error: str | None = None,
+    signals_message_id: str | None = None,
+) -> tuple[dict[str, Any], str]:
+    if status not in {
+        MANUAL_SIGNAL_READY,
+        MANUAL_SIGNAL_SENT,
+        MANUAL_SIGNAL_UNKNOWN,
+    }:
+        raise ValueError(f"Unsupported manual delivery transition: {status}")
+    outcome = "missing"
+
+    def mutation(state: dict[str, Any]) -> None:
+        nonlocal outcome
+        record = state["manual_signal_drafts"].get(draft_id)
+        if not isinstance(record, dict):
+            return
+        if (
+            manual_signal_delivery_status(record) != MANUAL_SIGNAL_SENDING
+            or record.get("delivery_attempt_id") != attempt_id
+        ):
+            outcome = "mismatch"
+            return
+        if status == MANUAL_SIGNAL_SENT and discord_id_text(
+            signals_message_id
+        ) is None:
+            outcome = "invalid"
+            return
+        record["delivery_status"] = status
+        record["delivery_finished_at"] = finished_at
+        record["updated_at"] = finished_at
+        if error is None:
+            record.pop("delivery_error", None)
+        else:
+            record["delivery_error"] = error
+        if status == MANUAL_SIGNAL_SENT:
+            record["signals_message_id"] = str(signals_message_id)
+        outcome = "transitioned"
+
+    return update_state(mutation), outcome
+
+
+def update_manual_signal_draft(
+    draft_id: str,
+    message_id: str,
+    channel_id: str,
+    *,
+    instrument: str,
+    trade_thesis: str,
+    timeframe: str,
+    setup_name: str,
+    chart: dict[str, str] | None,
+    updated_at: str,
+) -> tuple[dict[str, Any], str]:
+    outcome = "missing"
+
+    def mutation(state: dict[str, Any]) -> None:
+        nonlocal outcome
+        record = validated_manual_signal_draft(
+            state,
+            draft_id,
+            message_id,
+            channel_id,
+            channel_id,
+        )
+        if record is None:
+            outcome = "invalid"
+            return
+        if record["canceled"] or manual_signal_delivery_status(
+            record
+        ) != MANUAL_SIGNAL_READY:
+            outcome = "unavailable"
+            return
+        if not is_valid_manual_signal_fields(
+            instrument,
+            trade_thesis,
+            timeframe,
+            setup_name,
+        ):
+            outcome = "invalid"
+            return
+        if chart is not None and not is_valid_manual_chart_metadata(chart):
+            outcome = "invalid"
+            return
+        record.update(
+            {
+                "instrument": instrument.strip(),
+                "trade_thesis": trade_thesis.strip(),
+                "timeframe": timeframe.strip(),
+                "setup_name": setup_name.strip(),
+                "updated_at": updated_at,
+            }
+        )
+        if chart is not None:
+            record["chart"] = copy.deepcopy(chart)
+        outcome = "updated"
+
+    return update_state(mutation), outcome
+
+
+def cancel_manual_signal_draft(
+    draft_id: str,
+    message_id: str,
+    channel_id: str,
+    canceled_at: str,
+) -> tuple[dict[str, Any], str]:
+    outcome = "missing"
+
+    def mutation(state: dict[str, Any]) -> None:
+        nonlocal outcome
+        record = validated_manual_signal_draft(
+            state,
+            draft_id,
+            message_id,
+            channel_id,
+            channel_id,
+        )
+        if record is None:
+            outcome = "invalid"
+            return
+        if record["canceled"] or manual_signal_delivery_status(
+            record
+        ) != MANUAL_SIGNAL_READY:
+            outcome = "unavailable"
+            return
+        record["canceled"] = True
+        record["canceled_at"] = canceled_at
+        record["updated_at"] = canceled_at
+        outcome = "canceled"
+
+    return update_state(mutation), outcome
+
+
 def find_signal_item_by_review_message(
     state: dict[str, Any],
     message_id: str,
@@ -2322,6 +2713,20 @@ async def run_review_button_bot() -> None:
             required_env("EARNINGS_REVIEW_WEBHOOK")
         )
     )
+    raw_drafts_channel_id = os.getenv(
+        "SIGNAL_DRAFTS_CHANNEL_ID",
+        "",
+    ).strip()
+    try:
+        drafts_channel_id = (
+            int(raw_drafts_channel_id)
+            if raw_drafts_channel_id
+            else None
+        )
+    except ValueError as exc:
+        raise RuntimeError(
+            "SIGNAL_DRAFTS_CHANNEL_ID must be a Discord channel ID."
+        ) from exc
 
     intents = discord.Intents.default()
     client = discord.Client(intents=intents)
@@ -2514,6 +2919,652 @@ async def run_review_button_bot() -> None:
             )
 
     review_submission_locks = ReviewMessageAsyncLocks()
+    manual_draft_locks = ReviewMessageAsyncLocks()
+
+    class ManualSignalClosedView(discord.ui.View):
+        def __init__(self, label: str):
+            super().__init__(timeout=None)
+            self.add_item(
+                discord.ui.Button(
+                    label=label,
+                    style=discord.ButtonStyle.secondary,
+                    disabled=True,
+                    custom_id=f"manual_signal_{label.lower()}",
+                )
+            )
+
+    async def resolve_manual_draft(
+        interaction: Any,
+        *,
+        require_creator: bool,
+    ) -> tuple[str, dict[str, Any], Any] | None:
+        user = getattr(interaction, "user", None)
+        guild = getattr(interaction, "guild", None)
+        message = getattr(interaction, "message", None)
+        message_id = getattr(message, "id", None)
+        channel_id = getattr(interaction, "channel_id", None)
+        if (
+            drafts_channel_id is None
+            or not can_clear_earnings_review(user, guild)
+            or discord_id_text(channel_id) != str(drafts_channel_id)
+        ):
+            return None
+        try:
+            state = load_state()
+        except EarningsStateError:
+            return None
+        found = find_manual_signal_draft_by_message(state, message_id)
+        if found is None:
+            return None
+        draft_id, _record = found
+        record = validated_manual_signal_draft(
+            state,
+            draft_id,
+            message_id,
+            channel_id,
+            drafts_channel_id,
+        )
+        if record is None:
+            return None
+        if require_creator and discord_id_text(
+            getattr(user, "id", None)
+        ) != record["creator_user_id"]:
+            return None
+        if not is_valid_review_message_provenance(
+            message,
+            message_id=message_id,
+            channel_id=drafts_channel_id,
+            bot_user_id=getattr(client.user, "id", None),
+            normal_message_type=discord.MessageType.default,
+        ):
+            return None
+        try:
+            draft_channel = client.get_channel(drafts_channel_id)
+            if draft_channel is None:
+                draft_channel = await client.fetch_channel(drafts_channel_id)
+            current_message = await draft_channel.fetch_message(
+                int(record["draft_message_id"])
+            )
+        except Exception:
+            return None
+        if not is_valid_review_message_provenance(
+            current_message,
+            message_id=record["draft_message_id"],
+            channel_id=drafts_channel_id,
+            bot_user_id=getattr(client.user, "id", None),
+            normal_message_type=discord.MessageType.default,
+        ):
+            return None
+        return draft_id, record, current_message
+
+    class ManualSignalModal(discord.ui.Modal):
+        def __init__(
+            self,
+            opener_user_id: str,
+            *,
+            draft_id: str | None = None,
+            record: dict[str, Any] | None = None,
+        ):
+            super().__init__(title="New Trade Signal" if record is None else "Edit Trade Signal")
+            self.opener_user_id = opener_user_id
+            self.draft_id = draft_id
+            self.is_edit = record is not None
+            record = record or {}
+            self.draft_message_id = str(
+                record.get("draft_message_id", "")
+            )
+            self.instrument = discord.ui.TextInput(
+                required=True,
+                max_length=100,
+                default=record.get("instrument"),
+                custom_id="manual_signal_instrument",
+            )
+            self.timeframe = discord.ui.TextInput(
+                required=False,
+                max_length=100,
+                default=record.get("timeframe"),
+                custom_id="manual_signal_timeframe",
+            )
+            self.setup_name = discord.ui.TextInput(
+                required=False,
+                max_length=100,
+                default=record.get("setup_name"),
+                custom_id="manual_signal_setup",
+            )
+            self.trade_thesis = discord.ui.TextInput(
+                style=discord.TextStyle.paragraph,
+                required=True,
+                max_length=1800,
+                default=record.get("trade_thesis"),
+                custom_id="manual_signal_thesis",
+            )
+            self.trade_chart = discord.ui.FileUpload(
+                custom_id="manual_signal_chart",
+                required=not self.is_edit,
+                min_values=0 if self.is_edit else 1,
+                max_values=1,
+            )
+            for label, item in (
+                ("Instrument or symbol", self.instrument),
+                ("Timeframe (optional)", self.timeframe),
+                ("Setup name (optional)", self.setup_name),
+                ("Trade thesis", self.trade_thesis),
+            ):
+                self.add_item(discord.ui.Label(text=label, component=item))
+            self.add_item(
+                discord.ui.Label(
+                    text="Trade Chart",
+                    description=(
+                        "Upload PNG, JPG, JPEG, or WEBP. Leave blank while "
+                        "editing to retain the current chart."
+                    ),
+                    component=self.trade_chart,
+                )
+            )
+
+        async def on_submit(self, interaction: Any) -> None:
+            if str(getattr(getattr(interaction, "user", None), "id", "")) != self.opener_user_id:
+                await send_ephemeral_rejection(
+                    interaction,
+                    "This signal form is no longer available.",
+                )
+                return
+            if self.is_edit:
+                async with manual_draft_locks.hold(self.draft_message_id):
+                    await self._submit_edit(interaction)
+            else:
+                await self._submit_new(interaction)
+
+        def fields(self) -> tuple[str, str, str, str]:
+            return (
+                str(self.instrument.value).strip(),
+                str(self.trade_thesis.value).strip(),
+                str(self.timeframe.value or "").strip(),
+                str(self.setup_name.value or "").strip(),
+            )
+
+        async def _submit_new(self, interaction: Any) -> None:
+            if (
+                drafts_channel_id is None
+                or not can_clear_earnings_review(
+                    getattr(interaction, "user", None),
+                    getattr(interaction, "guild", None),
+                )
+                or discord_id_text(getattr(interaction, "channel_id", None))
+                != str(drafts_channel_id)
+            ):
+                await send_ephemeral_rejection(
+                    interaction,
+                    "This signal form is no longer available.",
+                )
+                return
+            instrument, thesis, timeframe, setup_name = self.fields()
+            if not is_valid_manual_signal_fields(
+                instrument, thesis, timeframe, setup_name
+            ):
+                await send_ephemeral_rejection(
+                    interaction,
+                    "The signal is incomplete or too long.",
+                )
+                return
+            uploads = list(self.trade_chart.values)
+            if len(uploads) != 1 or not is_valid_manual_chart_attachment(uploads[0]):
+                await send_ephemeral_rejection(
+                    interaction,
+                    "The chart must be a PNG, JPG, JPEG, or WEBP image.",
+                )
+                return
+            await defer_ephemeral_response(interaction)
+            attachment = uploads[0]
+            try:
+                draft_channel = client.get_channel(drafts_channel_id)
+                if draft_channel is None:
+                    draft_channel = await client.fetch_channel(drafts_channel_id)
+                draft_file = await attachment.to_file(
+                    filename=Path(attachment.filename).name
+                )
+                content = build_manual_signal_message(
+                    instrument,
+                    thesis,
+                    timeframe=timeframe,
+                    setup_name=setup_name,
+                )
+                draft_message = await draft_channel.send(
+                    content=content,
+                    file=draft_file,
+                    view=ManualSignalDraftView(),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except Exception as exc:
+                print("Manual signal draft creation failed:", repr(exc), flush=True)
+                await send_ephemeral_rejection(
+                    interaction,
+                    "The signal draft could not be created.",
+                )
+                return
+            message_id = discord_id_text(getattr(draft_message, "id", None))
+            if message_id is None:
+                await send_ephemeral_rejection(
+                    interaction,
+                    "The signal draft could not be confirmed.",
+                )
+                return
+            draft_id = uuid.uuid4().hex
+            now = datetime.now(EASTERN).isoformat()
+            posted_attachments = list(
+                getattr(draft_message, "attachments", []) or []
+            )
+            stored_attachment = (
+                posted_attachments[0]
+                if len(posted_attachments) == 1
+                and is_valid_manual_chart_attachment(posted_attachments[0])
+                else attachment
+            )
+            record = {
+                "draft_id": draft_id,
+                "draft_message_id": message_id,
+                "draft_channel_id": str(drafts_channel_id),
+                "creator_user_id": str(interaction.user.id),
+                "instrument": instrument,
+                "trade_thesis": thesis,
+                "timeframe": timeframe,
+                "setup_name": setup_name,
+                "chart": manual_chart_metadata(stored_attachment),
+                "created_at": now,
+                "updated_at": now,
+                "delivery_status": MANUAL_SIGNAL_READY,
+                "canceled": False,
+            }
+            try:
+                set_state_record("manual_signal_drafts", draft_id, record)
+            except (EarningsStateError, OSError):
+                try:
+                    await draft_message.edit(view=ManualSignalClosedView("Unavailable"))
+                except Exception:
+                    pass
+                await send_ephemeral_rejection(
+                    interaction,
+                    "The signal draft could not be saved.",
+                )
+                return
+            try:
+                await interaction.delete_original_response()
+            except Exception:
+                pass
+
+        async def _submit_edit(self, interaction: Any) -> None:
+            resolved = await resolve_manual_draft(
+                interaction,
+                require_creator=True,
+            )
+            if resolved is None or resolved[0] != self.draft_id:
+                await send_ephemeral_rejection(
+                    interaction,
+                    "This signal draft is no longer available.",
+                )
+                return
+            draft_id, record, draft_message = resolved
+            if record["canceled"] or manual_signal_delivery_status(record) != MANUAL_SIGNAL_READY:
+                await send_ephemeral_rejection(
+                    interaction,
+                    "This signal draft is no longer available.",
+                )
+                return
+            instrument, thesis, timeframe, setup_name = self.fields()
+            if not is_valid_manual_signal_fields(
+                instrument, thesis, timeframe, setup_name
+            ):
+                await send_ephemeral_rejection(
+                    interaction,
+                    "The signal is incomplete or too long.",
+                )
+                return
+            uploads = list(self.trade_chart.values)
+            if len(uploads) > 1 or (
+                uploads and not is_valid_manual_chart_attachment(uploads[0])
+            ):
+                await send_ephemeral_rejection(
+                    interaction,
+                    "The chart must be a PNG, JPG, JPEG, or WEBP image.",
+                )
+                return
+            await defer_ephemeral_response(interaction)
+            content = build_manual_signal_message(
+                instrument,
+                thesis,
+                timeframe=timeframe,
+                setup_name=setup_name,
+            )
+            chart = None
+            try:
+                if uploads:
+                    replacement = uploads[0]
+                    replacement_file = await replacement.to_file(
+                        filename=Path(replacement.filename).name
+                    )
+                    updated_message = await draft_message.edit(
+                        content=content,
+                        attachments=[replacement_file],
+                        view=ManualSignalDraftView(),
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+                    updated_attachments = list(
+                        getattr(updated_message, "attachments", []) or []
+                    )
+                    stored_replacement = (
+                        updated_attachments[0]
+                        if len(updated_attachments) == 1
+                        and is_valid_manual_chart_attachment(updated_attachments[0])
+                        else replacement
+                    )
+                    chart = manual_chart_metadata(stored_replacement)
+                else:
+                    await draft_message.edit(
+                        content=content,
+                        view=ManualSignalDraftView(),
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+            except Exception:
+                await send_ephemeral_rejection(
+                    interaction,
+                    "The signal draft could not be updated.",
+                )
+                return
+            try:
+                _state, outcome = update_manual_signal_draft(
+                    draft_id,
+                    record["draft_message_id"],
+                    record["draft_channel_id"],
+                    instrument=instrument,
+                    trade_thesis=thesis,
+                    timeframe=timeframe,
+                    setup_name=setup_name,
+                    chart=chart,
+                    updated_at=datetime.now(EASTERN).isoformat(),
+                )
+            except (EarningsStateError, OSError):
+                outcome = "persistence_failed"
+            if outcome != "updated":
+                await send_ephemeral_rejection(
+                    interaction,
+                    "The draft changed, but its state needs staff review.",
+                )
+                return
+            try:
+                await interaction.delete_original_response()
+            except Exception:
+                pass
+
+    class ManualSignalDraftView(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=None)
+
+        @discord.ui.button(
+            label="Publish",
+            style=discord.ButtonStyle.success,
+            custom_id="manual_signal_publish",
+        )
+        async def publish(self, interaction, button):
+            message_id = str(getattr(getattr(interaction, "message", None), "id", ""))
+            async with manual_draft_locks.hold(message_id):
+                resolved = await resolve_manual_draft(
+                    interaction,
+                    require_creator=False,
+                )
+                if resolved is None:
+                    await send_ephemeral_rejection(
+                        interaction,
+                        "This signal draft is no longer available.",
+                    )
+                    return
+                draft_id, record, draft_message = resolved
+                if record["canceled"]:
+                    await send_ephemeral_rejection(
+                        interaction,
+                        "This signal draft is no longer available.",
+                    )
+                    return
+                attempt_id = uuid.uuid4().hex
+                now = datetime.now(EASTERN).isoformat()
+                try:
+                    _state, outcome = claim_manual_signal_delivery(
+                        draft_id,
+                        record["draft_message_id"],
+                        record["draft_channel_id"],
+                        attempt_id,
+                        now,
+                    )
+                except EarningsStateError:
+                    outcome = "invalid"
+                if outcome != "claimed":
+                    messages = {
+                        MANUAL_SIGNAL_SENDING: "This signal is already being published.",
+                        MANUAL_SIGNAL_SENT: "This signal was already published.",
+                        MANUAL_SIGNAL_UNKNOWN: "This signal needs staff reconciliation before retrying.",
+                    }
+                    await send_ephemeral_rejection(
+                        interaction,
+                        messages.get(outcome, "This signal draft is no longer available."),
+                    )
+                    return
+                await defer_ephemeral_response(interaction)
+
+                async def finish(status: str, error: str, user_message: str) -> None:
+                    try:
+                        _latest, transition = transition_manual_signal_delivery(
+                            draft_id,
+                            attempt_id,
+                            status,
+                            datetime.now(EASTERN).isoformat(),
+                            error=error,
+                        )
+                    except (EarningsStateError, OSError):
+                        transition = "persistence_failed"
+                    if transition != "transitioned":
+                        user_message = (
+                            "The delivery state needs staff reconciliation. "
+                            "Do not retry this signal yet."
+                        )
+                    await send_ephemeral_rejection(interaction, user_message)
+
+                attachments = list(getattr(draft_message, "attachments", []) or [])
+                if len(attachments) != 1 or not manual_chart_matches_record(
+                    attachments[0], record["chart"]
+                ):
+                    await finish(
+                        MANUAL_SIGNAL_READY,
+                        "draft_chart_unavailable",
+                        "The draft chart is unavailable. Please edit the draft.",
+                    )
+                    return
+                content = build_manual_signal_message(
+                    record["instrument"],
+                    record["trade_thesis"],
+                    timeframe=record["timeframe"],
+                    setup_name=record["setup_name"],
+                )
+                if len(content) > MANUAL_SIGNAL_MAX_CONTENT_LENGTH:
+                    await finish(
+                        MANUAL_SIGNAL_READY,
+                        "signal_content_too_long",
+                        "The signal is too long. Please edit the draft.",
+                    )
+                    return
+                try:
+                    signals_channel = client.get_channel(signals_channel_id)
+                    if signals_channel is None:
+                        signals_channel = await client.fetch_channel(signals_channel_id)
+                    if signals_channel is None:
+                        raise DefiniteDeliveryError("Signals channel unavailable")
+                    chart_file = await attachments[0].to_file(
+                        filename=Path(record["chart"]["filename"]).name
+                    )
+                except asyncio.CancelledError:
+                    try:
+                        transition_manual_signal_delivery(
+                            draft_id,
+                            attempt_id,
+                            MANUAL_SIGNAL_READY,
+                            datetime.now(EASTERN).isoformat(),
+                            error="pre_delivery_cancelled",
+                        )
+                    except (EarningsStateError, OSError):
+                        pass
+                    raise
+                except Exception:
+                    await finish(
+                        MANUAL_SIGNAL_READY,
+                        "pre_delivery_failed",
+                        "The signal could not be prepared. Please try again.",
+                    )
+                    return
+                try:
+                    signals_message = await signals_channel.send(
+                        content=content,
+                        file=chart_file,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+                except asyncio.CancelledError:
+                    try:
+                        transition_manual_signal_delivery(
+                            draft_id,
+                            attempt_id,
+                            MANUAL_SIGNAL_UNKNOWN,
+                            datetime.now(EASTERN).isoformat(),
+                            error="discord_delivery_ambiguous",
+                        )
+                    except (EarningsStateError, OSError):
+                        pass
+                    raise
+                except (discord.Forbidden, discord.HTTPException):
+                    await finish(
+                        MANUAL_SIGNAL_READY,
+                        "discord_rejected",
+                        "Discord rejected the Signals post. Please try again.",
+                    )
+                    return
+                except Exception:
+                    await finish(
+                        MANUAL_SIGNAL_UNKNOWN,
+                        "discord_delivery_ambiguous",
+                        "Delivery could not be confirmed. Do not retry until staff reconcile it.",
+                    )
+                    return
+                signals_message_id = discord_id_text(
+                    getattr(signals_message, "id", None)
+                )
+                if signals_message_id is None:
+                    await finish(
+                        MANUAL_SIGNAL_UNKNOWN,
+                        "discord_message_id_missing",
+                        "Delivery could not be confirmed. Do not retry until staff reconcile it.",
+                    )
+                    return
+                try:
+                    _state, confirmation = transition_manual_signal_delivery(
+                        draft_id,
+                        attempt_id,
+                        MANUAL_SIGNAL_SENT,
+                        datetime.now(EASTERN).isoformat(),
+                        signals_message_id=signals_message_id,
+                    )
+                except (EarningsStateError, OSError):
+                    confirmation = "persistence_failed"
+                if confirmation != "transitioned":
+                    await send_ephemeral_rejection(
+                        interaction,
+                        "Signals accepted the post, but confirmation failed. Do not retry.",
+                    )
+                    return
+                try:
+                    await draft_message.edit(view=ManualSignalClosedView("Published"))
+                except Exception as exc:
+                    print("Could not mark manual signal draft published:", repr(exc), flush=True)
+                try:
+                    await interaction.delete_original_response()
+                except Exception:
+                    pass
+
+        @discord.ui.button(
+            label="Edit",
+            style=discord.ButtonStyle.primary,
+            custom_id="manual_signal_edit",
+        )
+        async def edit(self, interaction, button):
+            resolved = await resolve_manual_draft(
+                interaction,
+                require_creator=True,
+            )
+            if resolved is None:
+                await send_ephemeral_rejection(
+                    interaction,
+                    "This signal draft is no longer available.",
+                )
+                return
+            draft_id, record, _message = resolved
+            if record["canceled"] or manual_signal_delivery_status(record) != MANUAL_SIGNAL_READY:
+                await send_ephemeral_rejection(
+                    interaction,
+                    "This signal draft is no longer available.",
+                )
+                return
+            if interaction_response_is_done(interaction):
+                await send_ephemeral_rejection(
+                    interaction,
+                    "This signal draft is no longer available.",
+                )
+                return
+            await interaction.response.send_modal(
+                ManualSignalModal(
+                    str(interaction.user.id),
+                    draft_id=draft_id,
+                    record=record,
+                )
+            )
+
+        @discord.ui.button(
+            label="Cancel",
+            style=discord.ButtonStyle.danger,
+            custom_id="manual_signal_cancel",
+        )
+        async def cancel(self, interaction, button):
+            message_id = str(getattr(getattr(interaction, "message", None), "id", ""))
+            async with manual_draft_locks.hold(message_id):
+                resolved = await resolve_manual_draft(
+                    interaction,
+                    require_creator=True,
+                )
+                if resolved is None:
+                    await send_ephemeral_rejection(
+                        interaction,
+                        "This signal draft is no longer available.",
+                    )
+                    return
+                draft_id, record, draft_message = resolved
+                try:
+                    _state, outcome = cancel_manual_signal_draft(
+                        draft_id,
+                        record["draft_message_id"],
+                        record["draft_channel_id"],
+                        datetime.now(EASTERN).isoformat(),
+                    )
+                except EarningsStateError:
+                    outcome = "invalid"
+                if outcome != "canceled":
+                    await send_ephemeral_rejection(
+                        interaction,
+                        "This signal draft is no longer available.",
+                    )
+                    return
+                try:
+                    await draft_message.edit(view=ManualSignalClosedView("Canceled"))
+                except Exception:
+                    await send_ephemeral_rejection(
+                        interaction,
+                        "The draft was canceled, but its controls could not be updated.",
+                    )
+                    return
+                await send_ephemeral_rejection(interaction, "Signal draft canceled.")
 
     class TradeThesisModal(discord.ui.Modal):
         def __init__(
@@ -3123,6 +4174,37 @@ async def run_review_button_bot() -> None:
                 raise
 
     @command_tree.command(
+        name="new-signal",
+        description="Create a staff-reviewed Signals draft.",
+    )
+    @discord.app_commands.guild_only()
+    @discord.app_commands.default_permissions(manage_messages=True)
+    async def new_signal(interaction: discord.Interaction) -> None:
+        if (
+            drafts_channel_id is None
+            or not can_clear_earnings_review(
+                getattr(interaction, "user", None),
+                getattr(interaction, "guild", None),
+            )
+            or discord_id_text(getattr(interaction, "channel_id", None))
+            != str(drafts_channel_id)
+        ):
+            await send_ephemeral_rejection(
+                interaction,
+                "This command is not available here.",
+            )
+            return
+        if interaction_response_is_done(interaction):
+            await send_ephemeral_rejection(
+                interaction,
+                "This command is no longer available.",
+            )
+            return
+        await interaction.response.send_modal(
+            ManualSignalModal(str(interaction.user.id))
+        )
+
+    @command_tree.command(
         name="clear-earnings-review",
         description="Clear bot posts from earnings review.",
     )
@@ -3261,6 +4343,7 @@ async def run_review_button_bot() -> None:
 
     # Register once, globally, so buttons continue to work even though
     # review messages are posted by a separate process through REST.
+    client.add_view(ManualSignalDraftView())
     client.add_view(EarningsReviewView())
 
     await client.start(bot_token)
