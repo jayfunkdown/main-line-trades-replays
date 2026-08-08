@@ -513,8 +513,10 @@ class SendToSignalsCharacterizationTests(unittest.IsolatedAsyncioTestCase):
             interaction.followup.send.await_args.args[0].lower(),
         )
 
-    async def test_signal_post_then_save_failure_can_post_duplicate_on_retry(self):
-        signals_channel = SimpleNamespace(send=AsyncMock())
+    async def test_signal_post_then_confirmation_failure_blocks_retry(self):
+        signals_channel = SimpleNamespace(
+            send=AsyncMock(return_value=SimpleNamespace(id=555))
+        )
         review_channel = SimpleNamespace(fetch_message=AsyncMock())
         modal, _client, reviewer, guild = await self.build_modal(
             signals_channel,
@@ -523,6 +525,15 @@ class SendToSignalsCharacterizationTests(unittest.IsolatedAsyncioTestCase):
         persisted_state = self.signal_state(sent=False)
         interaction_one = self.submit_interaction(reviewer, guild)
         interaction_two = self.submit_interaction(reviewer, guild)
+        transactional_update = self.transactional_update(persisted_state)
+        update_calls = 0
+
+        def fail_confirmation(mutation):
+            nonlocal update_calls
+            update_calls += 1
+            if update_calls == 2:
+                raise OSError("simulated state save failure")
+            return transactional_update(mutation)
 
         with (
             patch.object(
@@ -536,23 +547,28 @@ class SendToSignalsCharacterizationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 earnings_reactions,
                 "update_state",
-                side_effect=self.transactional_update(
-                    persisted_state,
-                    OSError("simulated state save failure"),
-                ),
+                side_effect=fail_confirmation,
             ) as update_state,
             redirect_stdout(StringIO()),
         ):
-            with self.assertRaisesRegex(OSError, "state save failure"):
-                await modal.on_submit(interaction_one)
-            with self.assertRaisesRegex(OSError, "state save failure"):
-                await modal.on_submit(interaction_two)
+            await modal.on_submit(interaction_one)
+            await modal.on_submit(interaction_two)
 
-        self.assertEqual(signals_channel.send.await_count, 2)
-        self.assertEqual(update_state.call_count, 2)
+        self.assertEqual(signals_channel.send.await_count, 1)
+        self.assertEqual(update_state.call_count, 3)
         self.assertEqual(review_channel.fetch_message.await_count, 2)
-        self.assertFalse(
-            persisted_state["signal_queue"]["token"]["sent_to_signals"]
+        item = persisted_state["signal_queue"]["token"]
+        self.assertFalse(item["sent_to_signals"])
+        self.assertEqual(item["delivery_status"], "sending")
+        self.assertTrue(item["delivery_attempt_id"])
+        self.assertNotIn("signals_message_id", item)
+        self.assertIn(
+            "do not retry",
+            interaction_one.followup.send.await_args.args[0].lower(),
+        )
+        self.assertIn(
+            "already being sent",
+            interaction_two.followup.send.await_args.args[0].lower(),
         )
 
     async def test_signal_post_failure_does_not_mark_or_save_state(self):
@@ -572,6 +588,7 @@ class SendToSignalsCharacterizationTests(unittest.IsolatedAsyncioTestCase):
         )
         state = self.signal_state(sent=False)
         interaction = self.submit_interaction(reviewer, guild)
+        transactional_update = self.transactional_update(state)
 
         with (
             patch.object(
@@ -579,16 +596,28 @@ class SendToSignalsCharacterizationTests(unittest.IsolatedAsyncioTestCase):
                 "load_state",
                 return_value=state,
             ),
-            patch.object(earnings_reactions, "update_state") as update_state,
+            patch.object(
+                earnings_reactions,
+                "update_state",
+                side_effect=transactional_update,
+            ) as update_state,
             redirect_stdout(StringIO()),
         ):
             await modal.on_submit(interaction)
 
         signals_channel.send.assert_awaited_once()
-        update_state.assert_not_called()
+        self.assertEqual(update_state.call_count, 2)
         review_channel.fetch_message.assert_awaited_once_with(321)
         self.assertFalse(
             state["signal_queue"]["token"]["sent_to_signals"]
+        )
+        self.assertEqual(
+            state["signal_queue"]["token"]["delivery_status"],
+            "ready",
+        )
+        self.assertEqual(
+            state["signal_queue"]["token"]["delivery_error"],
+            "discord_rejected",
         )
         self.assertNotIn("trade_thesis", state["signal_queue"]["token"])
         self.assertIn(

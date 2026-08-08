@@ -59,6 +59,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 
 import argparse
+import asyncio
 import copy
 import hashlib
 import tempfile
@@ -71,8 +72,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import Any, AsyncIterator, Callable
 from zoneinfo import ZoneInfo
 
 try:
@@ -100,6 +103,17 @@ DISCORD_BULK_DELETE_SAFE_AGE = timedelta(days=13, hours=23)
 DISCORD_API_BASE = "https://discord.com/api/v10"
 YAHOO_CHART_BASE = "https://query1.finance.yahoo.com/v8/finance/chart"
 WEEKLY_CHART_WEEKS = 52
+
+SIGNAL_DELIVERY_READY = "ready"
+SIGNAL_DELIVERY_SENDING = "sending"
+SIGNAL_DELIVERY_SENT = "sent"
+SIGNAL_DELIVERY_UNKNOWN = "unknown"
+SIGNAL_DELIVERY_STATUSES = {
+    SIGNAL_DELIVERY_READY,
+    SIGNAL_DELIVERY_SENDING,
+    SIGNAL_DELIVERY_SENT,
+    SIGNAL_DELIVERY_UNKNOWN,
+}
 
 
 PRIORITY_TICKERS = {
@@ -1556,6 +1570,7 @@ def send_private_review_with_chart(
             ).isoformat()
         ),
         "sent_to_signals": False,
+        "delivery_status": SIGNAL_DELIVERY_READY,
     }
 
     latest_state = set_state_record(
@@ -1750,6 +1765,183 @@ def is_valid_signal_candidate(candidate: Any) -> bool:
     return True
 
 
+def signal_delivery_status(item: Any) -> str | None:
+    """Resolve additive delivery status, including legacy queue records."""
+    if not isinstance(item, dict):
+        return None
+
+    sent_to_signals = item.get("sent_to_signals")
+    if not isinstance(sent_to_signals, bool):
+        return None
+
+    status = item.get("delivery_status")
+    if status is None:
+        return (
+            SIGNAL_DELIVERY_SENT
+            if sent_to_signals
+            else SIGNAL_DELIVERY_READY
+        )
+
+    if status not in SIGNAL_DELIVERY_STATUSES:
+        return None
+
+    if sent_to_signals != (status == SIGNAL_DELIVERY_SENT):
+        return None
+
+    return status
+
+
+def signal_delivery_rejection_message(status: str | None) -> str:
+    # Sending and unknown are deliberately fail-closed. Staff must reconcile
+    # them against Discord before changing state or allowing another attempt.
+    return {
+        SIGNAL_DELIVERY_SENDING: (
+            "This setup is already being sent to Signals."
+        ),
+        SIGNAL_DELIVERY_SENT: (
+            "This setup was already sent to Signals."
+        ),
+        SIGNAL_DELIVERY_UNKNOWN: (
+            "This setup needs staff reconciliation before retrying."
+        ),
+    }.get(
+        status,
+        "This earnings review is no longer available.",
+    )
+
+
+def claim_signal_delivery(
+    token: str,
+    review_message_id: str,
+    review_channel_id: str,
+    attempt_id: str,
+    started_at: str,
+) -> tuple[dict[str, Any], str]:
+    """Atomically move one ready queue record to sending."""
+    outcome = "missing"
+
+    def mutation(state: dict[str, Any]) -> None:
+        nonlocal outcome
+        found = validated_review_state_item(
+            state,
+            review_message_id,
+            review_channel_id,
+            review_channel_id,
+        )
+        if found is None or found[0] != token:
+            outcome = "invalid"
+            return
+
+        _found_token, item = found
+        status = signal_delivery_status(item)
+
+        if status is None:
+            outcome = "invalid"
+            return
+
+        if status != SIGNAL_DELIVERY_READY:
+            outcome = status
+            return
+
+        item["delivery_status"] = SIGNAL_DELIVERY_SENDING
+        item["delivery_attempt_id"] = attempt_id
+        item["delivery_started_at"] = started_at
+        item["sent_to_signals"] = False
+        item.pop("delivery_error", None)
+        item.pop("delivery_finished_at", None)
+        item.pop("signals_message_id", None)
+        outcome = "claimed"
+
+    state = update_state(mutation)
+    return state, outcome
+
+
+def transition_signal_delivery(
+    token: str,
+    attempt_id: str,
+    status: str,
+    finished_at: str,
+    *,
+    error: str | None = None,
+    updates: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], str]:
+    """Atomically finish the matching sending attempt."""
+    if status not in {
+        SIGNAL_DELIVERY_READY,
+        SIGNAL_DELIVERY_SENT,
+        SIGNAL_DELIVERY_UNKNOWN,
+    }:
+        raise ValueError(f"Unsupported signal delivery transition: {status}")
+
+    outcome = "missing"
+    stored_updates = copy.deepcopy(updates or {})
+
+    def mutation(state: dict[str, Any]) -> None:
+        nonlocal outcome
+        item = state["signal_queue"].get(token)
+
+        if not isinstance(item, dict):
+            outcome = "missing"
+            return
+
+        if (
+            signal_delivery_status(item) != SIGNAL_DELIVERY_SENDING
+            or str(item.get("delivery_attempt_id") or "") != attempt_id
+        ):
+            outcome = "mismatch"
+            return
+
+        item["delivery_status"] = status
+        item["delivery_finished_at"] = finished_at
+        item["sent_to_signals"] = status == SIGNAL_DELIVERY_SENT
+
+        if error is None:
+            item.pop("delivery_error", None)
+        else:
+            item["delivery_error"] = error
+
+        item.update(stored_updates)
+        outcome = "transitioned"
+
+    state = update_state(mutation)
+    return state, outcome
+
+
+class ReviewMessageAsyncLocks:
+    """Serialize same-process submissions while allowing different reviews."""
+
+    def __init__(self) -> None:
+        self._entries: dict[str, list[Any]] = {}
+
+    @property
+    def active_key_count(self) -> int:
+        return len(self._entries)
+
+    @asynccontextmanager
+    async def hold(self, message_id: str) -> AsyncIterator[None]:
+        key = str(message_id)
+        entry = self._entries.get(key)
+        if entry is None:
+            entry = [asyncio.Lock(), 0]
+            self._entries[key] = entry
+
+        entry[1] += 1
+        lock = entry[0]
+        acquired = False
+
+        try:
+            await lock.acquire()
+            acquired = True
+            yield
+        finally:
+            if acquired:
+                lock.release()
+
+            entry[1] -= 1
+            if entry[1] == 0 and self._entries.get(key) is entry:
+                self._entries.pop(key, None)
+
+
 def can_clear_earnings_review(
     user: Any,
     guild: Any,
@@ -1817,6 +2009,9 @@ def validated_review_state_item(
         return None
 
     if not isinstance(item.get("sent_to_signals"), bool):
+        return None
+
+    if signal_delivery_status(item) is None:
         return None
 
     return token, item
@@ -2234,6 +2429,8 @@ async def run_review_button_bot() -> None:
                 flush=True,
             )
 
+    review_submission_locks = ReviewMessageAsyncLocks()
+
     class TradeThesisModal(discord.ui.Modal):
         def __init__(
             self,
@@ -2252,6 +2449,7 @@ async def run_review_button_bot() -> None:
             self.opener_user_id = str(
                 opener_user_id
             )
+            self._submission_locks = review_submission_locks
 
             # Components V2 modal: thesis and chart live in the SAME form.
             self.trade_thesis = discord.ui.TextInput(
@@ -2295,6 +2493,32 @@ async def run_review_button_bot() -> None:
             )
 
         async def on_submit(
+            self,
+            interaction,
+        ):
+            user = getattr(interaction, "user", None)
+            guild = getattr(interaction, "guild", None)
+
+            if not can_clear_earnings_review(user, guild):
+                await send_ephemeral_rejection(
+                    interaction,
+                    "You cannot use this earnings review action.",
+                )
+                return
+
+            if str(getattr(user, "id", None) or "") != self.opener_user_id:
+                await send_ephemeral_rejection(
+                    interaction,
+                    "This earnings review form is no longer available.",
+                )
+                return
+
+            async with review_submission_locks.hold(
+                self.review_message_id
+            ):
+                await self._on_submit_locked(interaction)
+
+        async def _on_submit_locked(
             self,
             interaction,
         ):
@@ -2377,15 +2601,11 @@ async def run_review_button_bot() -> None:
                 )
                 return
 
-            if item.get(
-                "sent_to_signals"
-            ):
-                await interaction.followup.send(
-                    (
-                        "✅ This setup was already "
-                        "sent to Signals."
-                    ),
-                    ephemeral=True,
+            current_status = signal_delivery_status(item)
+            if current_status != SIGNAL_DELIVERY_READY:
+                await send_ephemeral_rejection(
+                    interaction,
+                    signal_delivery_rejection_message(current_status),
                 )
                 return
 
@@ -2437,116 +2657,232 @@ async def run_review_button_bot() -> None:
                 )
                 return
 
-            signals_channel = (
-                client.get_channel(
-                    signals_channel_id
+            attempt_id = uuid.uuid4().hex
+            attempt_started_at = datetime.now(
+                EASTERN
+            ).isoformat()
+
+            try:
+                state, claim_outcome = claim_signal_delivery(
+                    token,
+                    self.review_message_id,
+                    str(review_channel_id),
+                    attempt_id,
+                    attempt_started_at,
                 )
+            except EarningsStateError:
+                await send_ephemeral_rejection(
+                    interaction,
+                    "This earnings review is currently unavailable.",
+                )
+                return
+
+            if claim_outcome != "claimed":
+                await send_ephemeral_rejection(
+                    interaction,
+                    signal_delivery_rejection_message(claim_outcome),
+                )
+                return
+
+            item = state["signal_queue"][token]
+            candidate = item["candidate"]
+
+            async def finish_failed_attempt(
+                status: str,
+                error: str,
+                user_message: str,
+            ) -> bool:
+                try:
+                    _latest_state, outcome = transition_signal_delivery(
+                        token,
+                        attempt_id,
+                        status,
+                        datetime.now(EASTERN).isoformat(),
+                        error=error,
+                    )
+                except (EarningsStateError, OSError):
+                    outcome = "persistence_failed"
+
+                if outcome != "transitioned":
+                    await send_ephemeral_rejection(
+                        interaction,
+                        (
+                            "The delivery state needs staff reconciliation. "
+                            "Do not retry this setup yet."
+                        ),
+                    )
+                    return False
+
+                await send_ephemeral_rejection(
+                    interaction,
+                    user_message,
+                )
+                return True
+
+            signals_channel = client.get_channel(
+                signals_channel_id
             )
 
             if signals_channel is None:
                 try:
-                    signals_channel = (
-                        await client.fetch_channel(
-                            signals_channel_id
-                        )
+                    signals_channel = await client.fetch_channel(
+                        signals_channel_id
                     )
-                except discord.Forbidden:
-                    await interaction.followup.send(
-                        (
-                            "⚠️ The bot does not have "
-                            "access to the Signals channel. "
-                            "Give Main Line Trades Feed Filter "
-                            "View Channel, Send Messages, "
-                            "Embed Links, and Attach Files "
-                            "permissions in Signals."
-                        ),
-                        ephemeral=True,
+                except asyncio.CancelledError:
+                    try:
+                        transition_signal_delivery(
+                            token,
+                            attempt_id,
+                            SIGNAL_DELIVERY_READY,
+                            datetime.now(EASTERN).isoformat(),
+                            error="signals_channel_resolution_cancelled",
+                        )
+                    except (EarningsStateError, OSError):
+                        pass
+                    raise
+                except Exception:
+                    await finish_failed_attempt(
+                        SIGNAL_DELIVERY_READY,
+                        "signals_channel_unavailable",
+                        "The Signals channel is currently unavailable.",
                     )
                     return
 
+            if signals_channel is None:
+                await finish_failed_attempt(
+                    SIGNAL_DELIVERY_READY,
+                    "signals_channel_unavailable",
+                    "The Signals channel is currently unavailable.",
+                )
+                return
+
             try:
-                signal_file = (
-                    await attachment.to_file(
-                        filename=(
-                            f"{candidate['symbol']}"
-                            "_trade_chart"
-                            f"{Path(attachment.filename).suffix or '.png'}"
-                        )
+                signal_file = await attachment.to_file(
+                    filename=(
+                        f"{candidate['symbol']}"
+                        "_trade_chart"
+                        f"{Path(attachment.filename).suffix or '.png'}"
                     )
                 )
+                signal_content = build_signal_message(
+                    candidate,
+                    thesis,
+                )
+            except asyncio.CancelledError:
+                try:
+                    transition_signal_delivery(
+                        token,
+                        attempt_id,
+                        SIGNAL_DELIVERY_READY,
+                        datetime.now(EASTERN).isoformat(),
+                        error="attachment_conversion_cancelled",
+                    )
+                except (EarningsStateError, OSError):
+                    pass
+                raise
+            except Exception:
+                await finish_failed_attempt(
+                    SIGNAL_DELIVERY_READY,
+                    "attachment_conversion_failed",
+                    "The chart could not be prepared. Please try again.",
+                )
+                return
 
-                await signals_channel.send(
-                    content=build_signal_message(
-                        candidate,
-                        thesis,
-                    ),
+            try:
+                signals_message = await signals_channel.send(
+                    content=signal_content,
                     file=signal_file,
                     allowed_mentions=(
                         discord.AllowedMentions.none()
                     ),
                 )
-
-            except discord.Forbidden:
-                await interaction.followup.send(
-                    (
-                        "⚠️ The bot can see Signals but "
-                        "cannot post there. Give Main Line "
-                        "Trades Feed Filter Send Messages "
-                        "and Attach Files permissions in "
-                        "the Signals channel."
-                    ),
-                    ephemeral=True,
-                )
-                return
-
-            except discord.HTTPException as exc:
+            except asyncio.CancelledError:
+                try:
+                    transition_signal_delivery(
+                        token,
+                        attempt_id,
+                        SIGNAL_DELIVERY_UNKNOWN,
+                        datetime.now(EASTERN).isoformat(),
+                        error="discord_delivery_ambiguous",
+                    )
+                except (EarningsStateError, OSError):
+                    pass
+                raise
+            except (discord.Forbidden, discord.HTTPException) as exc:
                 print(
                     "Discord signal post failed:",
                     repr(exc),
                     flush=True,
                 )
-
-                await interaction.followup.send(
+                await finish_failed_attempt(
+                    SIGNAL_DELIVERY_READY,
+                    "discord_rejected",
+                    "Discord rejected the Signals post. Please try again.",
+                )
+                return
+            except Exception as exc:
+                print(
+                    "Discord signal delivery is ambiguous:",
+                    repr(exc),
+                    flush=True,
+                )
+                await finish_failed_attempt(
+                    SIGNAL_DELIVERY_UNKNOWN,
+                    "discord_delivery_ambiguous",
                     (
-                        "⚠️ Discord rejected the Signals "
-                        "post. Check the listener terminal "
-                        "for the exact error."
+                        "Discord delivery could not be confirmed. "
+                        "Do not retry until staff reconcile it."
                     ),
-                    ephemeral=True,
                 )
                 return
 
+            signals_message_id = discord_id_text(
+                getattr(signals_message, "id", None)
+            )
+            if signals_message_id is None:
+                await finish_failed_attempt(
+                    SIGNAL_DELIVERY_UNKNOWN,
+                    "discord_message_id_missing",
+                    (
+                        "Discord delivery could not be confirmed. "
+                        "Do not retry until staff reconcile it."
+                    ),
+                )
+                return
+
+            sent_at = datetime.now(EASTERN).isoformat()
             signal_updates = {
                 "trade_thesis": thesis,
-                "sent_to_signals": True,
-                "sent_at": datetime.now(
-                    EASTERN
-                ).isoformat(),
-                "sent_by": str(
-                    interaction.user
-                ),
+                "sent_at": sent_at,
+                "sent_by": str(interaction.user),
                 "signal_chart_filename": attachment.filename,
+                "signals_message_id": signals_message_id,
                 "awaiting_chart": False,
             }
 
-            def save_signal_result(
-                latest_state: dict[str, Any],
-            ) -> None:
-                latest_item = latest_state[
-                    "signal_queue"
-                ].get(token)
-
-                if not isinstance(latest_item, dict):
-                    raise RuntimeError(
-                        "The earnings review state changed "
-                        "before the Signals result could be saved."
+            try:
+                latest_state, confirmation_outcome = (
+                    transition_signal_delivery(
+                        token,
+                        attempt_id,
+                        SIGNAL_DELIVERY_SENT,
+                        sent_at,
+                        updates=signal_updates,
                     )
+                )
+            except (EarningsStateError, OSError):
+                confirmation_outcome = "persistence_failed"
 
-                latest_item.update(signal_updates)
+            if confirmation_outcome != "transitioned":
+                await send_ephemeral_rejection(
+                    interaction,
+                    (
+                        "Signals accepted the post, but confirmation failed. "
+                        "Do not retry; staff reconciliation is required."
+                    ),
+                )
+                return
 
-            latest_state = update_state(
-                save_signal_result
-            )
             state.clear()
             state.update(latest_state)
 
@@ -2637,6 +2973,15 @@ async def run_review_button_bot() -> None:
                 )
                 return
 
+            _token, item = found
+            current_status = signal_delivery_status(item)
+            if current_status != SIGNAL_DELIVERY_READY:
+                await send_ephemeral_rejection(
+                    interaction,
+                    signal_delivery_rejection_message(current_status),
+                )
+                return
+
             print(
                 "Send to Signals clicked:",
                 message_id,
@@ -2644,7 +2989,6 @@ async def run_review_button_bot() -> None:
                 flush=True,
             )
 
-            _token, item = found
             message_text = str(getattr(message, "content", "") or "")
             symbol = "Trade"
             for raw_line in message_text.splitlines():

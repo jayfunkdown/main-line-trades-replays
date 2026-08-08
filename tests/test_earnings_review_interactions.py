@@ -1,7 +1,9 @@
+import asyncio
 import copy
 import os
 import unittest
 from contextlib import redirect_stdout
+from datetime import datetime
 from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -34,6 +36,22 @@ class StatefulResponse:
 
     async def _defer(self, *args, **kwargs):
         self.acknowledged = True
+
+
+class ConcurrentAttachmentBarrier:
+    filename = "chart.png"
+    content_type = "image/png"
+
+    def __init__(self):
+        self.arrivals = 0
+        self.ready = asyncio.Event()
+
+    async def to_file(self, *, filename):
+        self.arrivals += 1
+        if self.arrivals == 2:
+            self.ready.set()
+        await self.ready.wait()
+        return f"synthetic-discord-file:{filename}"
 
 
 class EarningsReviewInteractionAuthorizationTests(
@@ -87,7 +105,9 @@ class EarningsReviewInteractionAuthorizationTests(
         }
 
     async def start_bot(self):
-        signals_channel = SimpleNamespace(send=AsyncMock())
+        signals_channel = SimpleNamespace(
+            send=AsyncMock(return_value=SimpleNamespace(id=555))
+        )
         review_channel = SimpleNamespace(fetch_message=AsyncMock())
         client = batch2.FakeDiscordClient(signals_channel, review_channel)
         review_channel.fetch_message.return_value = self.review_message(client)
@@ -281,9 +301,17 @@ class EarningsReviewInteractionAuthorizationTests(
 
                 attachment.to_file.assert_awaited_once()
                 signals_channel.send.assert_awaited_once()
-                update_state.assert_called_once()
+                self.assertEqual(update_state.call_count, 2)
                 self.assertTrue(
                     state["signal_queue"]["token"]["sent_to_signals"]
+                )
+                self.assertEqual(
+                    state["signal_queue"]["token"]["delivery_status"],
+                    "sent",
+                )
+                self.assertEqual(
+                    state["signal_queue"]["token"]["signals_message_id"],
+                    "555",
                 )
                 self.assertGreaterEqual(
                     review_channel.fetch_message.await_count,
@@ -319,6 +347,328 @@ class EarningsReviewInteractionAuthorizationTests(
                             malformed
                         )
                     )
+
+    def test_legacy_status_and_successful_state_transitions(self):
+        self.assertEqual(
+            earnings_reactions.signal_delivery_status(
+                {"sent_to_signals": False}
+            ),
+            "ready",
+        )
+        self.assertEqual(
+            earnings_reactions.signal_delivery_status(
+                {"sent_to_signals": True}
+            ),
+            "sent",
+        )
+        self.assertEqual(
+            earnings_reactions.signal_delivery_status(
+                {
+                    "sent_to_signals": False,
+                    "delivery_status": "unknown",
+                }
+            ),
+            "unknown",
+        )
+
+        state = self.signal_state()
+        with patch.object(
+            earnings_reactions,
+            "update_state",
+            side_effect=self.transactional_update(state),
+        ):
+            claimed_state, claim_outcome = (
+                earnings_reactions.claim_signal_delivery(
+                    "token",
+                    "321",
+                    "200",
+                    "attempt-one",
+                    "2026-08-06T10:00:00-04:00",
+                )
+            )
+            sent_state, sent_outcome = (
+                earnings_reactions.transition_signal_delivery(
+                    "token",
+                    "attempt-one",
+                    "sent",
+                    "2026-08-06T10:01:00-04:00",
+                    updates={"signals_message_id": "555"},
+                )
+            )
+
+        claimed_item = claimed_state["signal_queue"]["token"]
+        self.assertEqual(claim_outcome, "claimed")
+        self.assertEqual(claimed_item["delivery_status"], "sending")
+        self.assertEqual(claimed_item["delivery_attempt_id"], "attempt-one")
+        self.assertFalse(claimed_item["sent_to_signals"])
+
+        sent_item = sent_state["signal_queue"]["token"]
+        self.assertEqual(sent_outcome, "transitioned")
+        self.assertEqual(sent_item["delivery_status"], "sent")
+        self.assertTrue(sent_item["sent_to_signals"])
+        self.assertEqual(sent_item["signals_message_id"], "555")
+
+    def test_old_attempt_cannot_overwrite_a_new_claim(self):
+        state = self.signal_state()
+        with patch.object(
+            earnings_reactions,
+            "update_state",
+            side_effect=self.transactional_update(state),
+        ):
+            earnings_reactions.claim_signal_delivery(
+                "token",
+                "321",
+                "200",
+                "old-attempt",
+                "2026-08-06T10:00:00-04:00",
+            )
+            earnings_reactions.transition_signal_delivery(
+                "token",
+                "old-attempt",
+                "ready",
+                "2026-08-06T10:01:00-04:00",
+                error="definite_failure",
+            )
+            earnings_reactions.claim_signal_delivery(
+                "token",
+                "321",
+                "200",
+                "new-attempt",
+                "2026-08-06T10:02:00-04:00",
+            )
+            final_state, outcome = (
+                earnings_reactions.transition_signal_delivery(
+                    "token",
+                    "old-attempt",
+                    "sent",
+                    "2026-08-06T10:03:00-04:00",
+                    updates={"signals_message_id": "stale"},
+                )
+            )
+
+        item = final_state["signal_queue"]["token"]
+        self.assertEqual(outcome, "mismatch")
+        self.assertEqual(item["delivery_status"], "sending")
+        self.assertEqual(item["delivery_attempt_id"], "new-attempt")
+        self.assertNotIn("signals_message_id", item)
+
+    async def test_async_lock_entries_cleanup_after_success_error_and_cancel(self):
+        locks = earnings_reactions.ReviewMessageAsyncLocks()
+
+        async with locks.hold("321"):
+            self.assertEqual(locks.active_key_count, 1)
+        self.assertEqual(locks.active_key_count, 0)
+
+        with self.assertRaisesRegex(RuntimeError, "synthetic failure"):
+            async with locks.hold("321"):
+                raise RuntimeError("synthetic failure")
+        self.assertEqual(locks.active_key_count, 0)
+
+        async with locks.hold("321"):
+            waiting = asyncio.create_task(self._wait_for_lock(locks, "321"))
+            await asyncio.sleep(0)
+            waiting.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await waiting
+            self.assertEqual(locks.active_key_count, 1)
+
+        self.assertEqual(locks.active_key_count, 0)
+
+    @staticmethod
+    async def _wait_for_lock(locks, key):
+        async with locks.hold(key):
+            return
+
+    async def test_attachment_failure_returns_matching_attempt_to_ready(self):
+        client, signals_channel, _review_channel = await self.start_bot()
+        reviewer = self.user(1)
+        modal, attachment = await self.valid_modal(client, user=reviewer)
+        attachment.to_file.side_effect = OSError("synthetic conversion failure")
+        interaction = self.modal_interaction(reviewer, self.guild())
+        state = self.signal_state()
+
+        with patch.object(
+            earnings_reactions,
+            "load_state",
+            return_value=state,
+        ), patch.object(
+            earnings_reactions,
+            "update_state",
+            side_effect=self.transactional_update(state),
+        ) as update_state, redirect_stdout(StringIO()):
+            await modal.on_submit(interaction)
+
+        item = state["signal_queue"]["token"]
+        attachment.to_file.assert_awaited_once()
+        signals_channel.send.assert_not_awaited()
+        self.assertEqual(update_state.call_count, 2)
+        self.assertEqual(item["delivery_status"], "ready")
+        self.assertFalse(item["sent_to_signals"])
+        self.assertEqual(item["delivery_error"], "attachment_conversion_failed")
+        self.assertEqual(len(item["delivery_attempt_id"]), 32)
+        int(item["delivery_attempt_id"], 16)
+        datetime.fromisoformat(item["delivery_started_at"])
+        self.assertEqual(
+            modal._submission_locks.active_key_count,
+            0,
+        )
+
+    async def test_ambiguous_send_failures_become_unknown_and_block_retry(self):
+        failures = (
+            TimeoutError("synthetic timeout"),
+            ConnectionError("synthetic connection loss"),
+        )
+
+        for failure in failures:
+            with self.subTest(exception=type(failure).__name__):
+                client, signals_channel, _review_channel = await self.start_bot()
+                signals_channel.send.side_effect = failure
+                reviewer = self.user(1)
+                modal, attachment = await self.valid_modal(
+                    client,
+                    user=reviewer,
+                )
+                first_interaction = self.modal_interaction(
+                    reviewer,
+                    self.guild(),
+                )
+                second_interaction = self.modal_interaction(
+                    reviewer,
+                    self.guild(),
+                )
+                state = self.signal_state()
+
+                with patch.object(
+                    earnings_reactions,
+                    "load_state",
+                    side_effect=lambda: copy.deepcopy(state),
+                ), patch.object(
+                    earnings_reactions,
+                    "update_state",
+                    side_effect=self.transactional_update(state),
+                ) as update_state, redirect_stdout(StringIO()):
+                    await modal.on_submit(first_interaction)
+                    await modal.on_submit(second_interaction)
+
+                item = state["signal_queue"]["token"]
+                attachment.to_file.assert_awaited_once()
+                signals_channel.send.assert_awaited_once()
+                self.assertEqual(update_state.call_count, 2)
+                self.assertEqual(item["delivery_status"], "unknown")
+                self.assertFalse(item["sent_to_signals"])
+                self.assertEqual(
+                    item["delivery_error"],
+                    "discord_delivery_ambiguous",
+                )
+                self.assertIn(
+                    "do not retry",
+                    first_interaction.followup.send.await_args.args[0].lower(),
+                )
+                self.assertIn(
+                    "reconciliation",
+                    second_interaction.followup.send.await_args.args[0].lower(),
+                )
+
+    async def test_cancelled_discord_send_becomes_unknown_and_releases_lock(self):
+        client, signals_channel, _review_channel = await self.start_bot()
+        signals_channel.send.side_effect = asyncio.CancelledError()
+        reviewer = self.user(1)
+        modal, attachment = await self.valid_modal(client, user=reviewer)
+        interaction = self.modal_interaction(reviewer, self.guild())
+        state = self.signal_state()
+
+        with patch.object(
+            earnings_reactions,
+            "load_state",
+            return_value=state,
+        ), patch.object(
+            earnings_reactions,
+            "update_state",
+            side_effect=self.transactional_update(state),
+        ) as update_state, redirect_stdout(StringIO()):
+            with self.assertRaises(asyncio.CancelledError):
+                await modal.on_submit(interaction)
+
+        item = state["signal_queue"]["token"]
+        attachment.to_file.assert_awaited_once()
+        signals_channel.send.assert_awaited_once()
+        self.assertEqual(update_state.call_count, 2)
+        self.assertEqual(item["delivery_status"], "unknown")
+        self.assertEqual(item["delivery_error"], "discord_delivery_ambiguous")
+        self.assertEqual(modal._submission_locks.active_key_count, 0)
+
+    async def test_different_review_messages_deliver_independently(self):
+        client, signals_channel, review_channel = await self.start_bot()
+        reviewer = self.user(1)
+        state = self.signal_state()
+        second_item = copy.deepcopy(state["signal_queue"]["token"])
+        second_item["review_message_id"] = "654"
+        state["signal_queue"]["token-two"] = second_item
+
+        modal_one, _interaction_one = await self.click_button(
+            client,
+            user=reviewer,
+            guild=self.guild(),
+            state=state,
+            message_id=321,
+        )
+        modal_two, _interaction_two = await self.click_button(
+            client,
+            user=reviewer,
+            guild=self.guild(),
+            state=state,
+            message_id=654,
+        )
+        barrier = ConcurrentAttachmentBarrier()
+        for modal in (modal_one, modal_two):
+            self.assertIsNotNone(modal)
+            modal.trade_thesis._value = "Trade above resistance."
+            modal.trade_chart._values = [barrier]
+
+        async def fetch_review_message(message_id):
+            return self.review_message(client, message_id=message_id)
+
+        review_channel.fetch_message.side_effect = fetch_review_message
+        signals_channel.send.side_effect = (
+            SimpleNamespace(id=901),
+            SimpleNamespace(id=902),
+        )
+
+        with patch.object(
+            earnings_reactions,
+            "load_state",
+            side_effect=lambda: copy.deepcopy(state),
+        ), patch.object(
+            earnings_reactions,
+            "update_state",
+            side_effect=self.transactional_update(state),
+        ) as update_state, redirect_stdout(StringIO()):
+            await asyncio.gather(
+                modal_one.on_submit(
+                    self.modal_interaction(reviewer, self.guild())
+                ),
+                modal_two.on_submit(
+                    self.modal_interaction(reviewer, self.guild())
+                ),
+            )
+
+        self.assertEqual(barrier.arrivals, 2)
+        self.assertEqual(signals_channel.send.await_count, 2)
+        self.assertEqual(update_state.call_count, 4)
+        self.assertEqual(
+            {
+                item["delivery_status"]
+                for item in state["signal_queue"].values()
+            },
+            {"sent"},
+        )
+        self.assertEqual(
+            {
+                item["signals_message_id"]
+                for item in state["signal_queue"].values()
+            },
+            {"901", "902"},
+        )
 
     async def test_button_rejects_unauthorized_or_non_guild_interactions(self):
         client, signals_channel, _review_channel = await self.start_bot()

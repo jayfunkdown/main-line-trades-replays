@@ -264,21 +264,6 @@ class CorruptNestedExecutionTests(NoNetworkTestCase):
         self.assertEqual(persisted["signal_queue"], {})
 
 
-class TwoPartyAttachmentBarrier:
-    def __init__(self):
-        self.filename = "chart.png"
-        self.content_type = "image/png"
-        self.arrivals = 0
-        self.ready = asyncio.Event()
-
-    async def to_file(self, *, filename):
-        self.arrivals += 1
-        if self.arrivals == 2:
-            self.ready.set()
-        await self.ready.wait()
-        return f"discord-file:{filename}"
-
-
 class SendToSignalsRaceAndProvenanceTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.urlopen_patcher = patch.object(
@@ -461,16 +446,17 @@ class SendToSignalsRaceAndProvenanceTests(unittest.IsolatedAsyncioTestCase):
             delete_original_response=AsyncMock(),
         )
 
-    async def test_two_simultaneous_unsent_snapshots_both_post_signals(self):
-        signals_channel = SimpleNamespace(send=AsyncMock())
+    async def test_two_simultaneous_submissions_post_signals_once(self):
+        signals_channel = SimpleNamespace(
+            send=AsyncMock(return_value=SimpleNamespace(id=555))
+        )
         review_message = SimpleNamespace(edit=AsyncMock())
         review_channel = SimpleNamespace(
             fetch_message=AsyncMock(return_value=review_message)
         )
         client = await self.start_fake_bot(signals_channel, review_channel)
-        barrier = TwoPartyAttachmentBarrier()
-        modal_one = await self.open_modal(client, attachment=barrier)
-        modal_two = await self.open_modal(client, attachment=barrier)
+        modal_one = await self.open_modal(client)
+        modal_two = await self.open_modal(client)
         persisted_state = self.signal_state(sent=False)
 
         with (
@@ -493,15 +479,18 @@ class SendToSignalsRaceAndProvenanceTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(load_state.call_count, 2)
-        self.assertEqual(barrier.arrivals, 2)
-        self.assertEqual(signals_channel.send.await_count, 2)
+        self.assertEqual(signals_channel.send.await_count, 1)
         self.assertEqual(update_state.call_count, 2)
+        item = persisted_state["signal_queue"]["token"]
+        self.assertEqual(item["delivery_status"], "sent")
+        self.assertEqual(item["signals_message_id"], "555")
 
     async def test_review_update_failure_occurs_after_saved_signal_state(self):
         events = []
 
         async def send_signal(**kwargs):
             events.append("signal-posted")
+            return SimpleNamespace(id=555)
 
         signals_channel = SimpleNamespace(send=AsyncMock(side_effect=send_signal))
         review_channel = SimpleNamespace(
@@ -547,11 +536,16 @@ class SendToSignalsRaceAndProvenanceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             events,
-            ["signal-posted", "state-saved", "review-update-attempted"],
+            [
+                "state-saved",
+                "signal-posted",
+                "state-saved",
+                "review-update-attempted",
+            ],
         )
         self.assertTrue(state["signal_queue"]["token"]["sent_to_signals"])
         signals_channel.send.assert_awaited_once()
-        update_state.assert_called_once()
+        self.assertEqual(update_state.call_count, 2)
         first_interaction.delete_original_response.assert_awaited_once()
 
     async def test_button_rejects_wrong_channel_and_unprivileged_user(self):
