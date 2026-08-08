@@ -63,6 +63,7 @@ import copy
 import hashlib
 import tempfile
 import json
+from numbers import Real
 import os
 import re
 import sys
@@ -75,9 +76,9 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 try:
-    from .earnings_state import EarningsStateStore
+    from .earnings_state import EarningsStateError, EarningsStateStore
 except ImportError:
-    from earnings_state import EarningsStateStore
+    from earnings_state import EarningsStateError, EarningsStateStore
 
 
 FINNHUB_BASE_URL = "https://finnhub.io/api/v1"
@@ -1691,7 +1692,14 @@ def find_signal_item_by_review_message(
     state: dict[str, Any],
     message_id: str,
 ) -> tuple[str, dict[str, Any]] | None:
-    for token, item in state.setdefault("signal_queue", {}).items():
+    if not isinstance(state, dict):
+        return None
+
+    signal_queue = state.get("signal_queue")
+    if not isinstance(signal_queue, dict):
+        return None
+
+    for token, item in signal_queue.items():
         if not isinstance(item, dict):
             continue
 
@@ -1699,6 +1707,47 @@ def find_signal_item_by_review_message(
             return token, item
 
     return None
+
+
+def discord_id_text(value: Any) -> str | None:
+    """Normalize a Discord snowflake while rejecting missing/bad values."""
+    if isinstance(value, bool):
+        return None
+
+    text = str(value or "")
+    if not text.isdecimal() or int(text) <= 0:
+        return None
+
+    return text
+
+
+def is_valid_signal_candidate(candidate: Any) -> bool:
+    """Validate every candidate field consumed by Signals delivery."""
+    if not isinstance(candidate, dict):
+        return False
+
+    symbol = candidate.get("symbol")
+    if not isinstance(symbol, str) or not symbol.strip():
+        return False
+
+    for field in ("eps_direction", "revenue_direction"):
+        if not isinstance(candidate.get(field), str):
+            return False
+
+    for field in (
+        "move_percent",
+        "current_price",
+        "eps_surprise",
+        "revenue_surprise",
+    ):
+        value = candidate.get(field)
+        if value is not None and (
+            isinstance(value, bool)
+            or not isinstance(value, Real)
+        ):
+            return False
+
+    return True
 
 
 def can_clear_earnings_review(
@@ -1709,9 +1758,13 @@ def can_clear_earnings_review(
     if user is None or guild is None:
         return False
 
-    if str(getattr(guild, "owner_id", "")) == str(
-        getattr(user, "id", "")
-    ):
+    user_id = discord_id_text(getattr(user, "id", None))
+    owner_id = getattr(guild, "owner_id", None)
+
+    if user_id is None:
+        return False
+
+    if discord_id_text(owner_id) == user_id:
         return True
 
     permissions = getattr(user, "guild_permissions", None)
@@ -1719,9 +1772,90 @@ def can_clear_earnings_review(
     if permissions is None:
         return False
 
+    return (
+        getattr(permissions, "administrator", False) is True
+        or getattr(permissions, "manage_messages", False) is True
+    )
+
+
+def validated_review_state_item(
+    state: dict[str, Any],
+    message_id: Any,
+    channel_id: Any,
+    configured_channel_id: Any,
+) -> tuple[str, dict[str, Any]] | None:
+    """Return a complete state record matching the Discord provenance."""
+    expected_message_id = discord_id_text(message_id)
+    expected_channel_id = discord_id_text(channel_id)
+
+    if expected_message_id is None or expected_channel_id is None:
+        return None
+
+    if expected_channel_id != discord_id_text(configured_channel_id):
+        return None
+
+    found = find_signal_item_by_review_message(
+        state,
+        expected_message_id,
+    )
+    if found is None:
+        return None
+
+    token, item = found
+    candidate = item.get("candidate")
+
+    if not str(token):
+        return None
+
+    if str(item.get("review_message_id") or "") != expected_message_id:
+        return None
+
+    if str(item.get("review_channel_id") or "") != expected_channel_id:
+        return None
+
+    if not is_valid_signal_candidate(candidate):
+        return None
+
+    if not isinstance(item.get("sent_to_signals"), bool):
+        return None
+
+    return token, item
+
+
+def is_valid_review_message_provenance(
+    message: Any,
+    *,
+    message_id: Any,
+    channel_id: Any,
+    bot_user_id: Any,
+    normal_message_type: Any,
+) -> bool:
+    """Validate the original review message against Discord metadata."""
+    expected_message_id = discord_id_text(message_id)
+    expected_channel_id = discord_id_text(channel_id)
+    expected_bot_id = discord_id_text(bot_user_id)
+
+    if (
+        message is None
+        or expected_message_id is None
+        or expected_channel_id is None
+        or expected_bot_id is None
+    ):
+        return False
+
+    author = getattr(message, "author", None)
+    channel = getattr(message, "channel", None)
+
     return bool(
-        getattr(permissions, "administrator", False)
-        or getattr(permissions, "manage_messages", False)
+        discord_id_text(getattr(message, "id", None))
+        == expected_message_id
+        and author is not None
+        and discord_id_text(getattr(author, "id", None))
+        == expected_bot_id
+        and channel is not None
+        and discord_id_text(getattr(channel, "id", None))
+        == expected_channel_id
+        and getattr(message, "type", None) == normal_message_type
     )
 
 
@@ -1988,6 +2122,70 @@ async def run_review_button_bot() -> None:
                 flush=True,
             )
 
+    def interaction_response_is_done(
+        interaction: Any,
+    ) -> bool:
+        response = getattr(interaction, "response", None)
+        is_done = getattr(response, "is_done", None)
+
+        if not callable(is_done):
+            return False
+
+        try:
+            return bool(is_done())
+        except Exception:
+            return True
+
+    async def send_ephemeral_rejection(
+        interaction: Any,
+        message: str,
+    ) -> None:
+        response = getattr(interaction, "response", None)
+        response_sender = getattr(response, "send_message", None)
+
+        if (
+            callable(response_sender)
+            and not interaction_response_is_done(interaction)
+        ):
+            try:
+                await response_sender(
+                    message,
+                    ephemeral=True,
+                )
+            except discord.InteractionResponded:
+                pass
+            else:
+                return
+
+        followup = getattr(interaction, "followup", None)
+        followup_sender = getattr(followup, "send", None)
+
+        if callable(followup_sender):
+            await followup_sender(
+                message,
+                ephemeral=True,
+            )
+
+    async def defer_ephemeral_response(
+        interaction: Any,
+    ) -> None:
+        if interaction_response_is_done(interaction):
+            return
+
+        response = getattr(interaction, "response", None)
+        defer = getattr(response, "defer", None)
+
+        if not callable(defer):
+            return
+
+        try:
+            await defer(
+                ephemeral=True,
+                thinking=True,
+            )
+        except discord.InteractionResponded:
+            pass
+
     class SentEarningsReviewView(
         discord.ui.View,
     ):
@@ -2041,6 +2239,7 @@ async def run_review_button_bot() -> None:
             self,
             review_message_id: str,
             symbol: str,
+            opener_user_id: str,
         ):
             super().__init__(
                 title=f"{symbol} Trade Signal"
@@ -2050,6 +2249,9 @@ async def run_review_button_bot() -> None:
                 review_message_id
             )
             self.symbol = symbol
+            self.opener_user_id = str(
+                opener_user_id
+            )
 
             # Components V2 modal: thesis and chart live in the SAME form.
             self.trade_thesis = discord.ui.TextInput(
@@ -2096,32 +2298,84 @@ async def run_review_button_bot() -> None:
             self,
             interaction,
         ):
-            state = load_state()
+            user = getattr(interaction, "user", None)
+            guild = getattr(interaction, "guild", None)
+            channel_id = getattr(interaction, "channel_id", None)
+            user_id = getattr(user, "id", None)
 
-            # Acknowledge immediately because converting an attachment and
-            # posting it can take longer than Discord's interaction window.
-            await interaction.response.defer(
-                ephemeral=True,
-                thinking=True,
-            )
+            if not can_clear_earnings_review(user, guild):
+                await send_ephemeral_rejection(
+                    interaction,
+                    "You cannot use this earnings review action.",
+                )
+                return
 
-            found = find_signal_item_by_review_message(
+            if str(user_id or "") != self.opener_user_id:
+                await send_ephemeral_rejection(
+                    interaction,
+                    "This earnings review form is no longer available.",
+                )
+                return
+
+            try:
+                state = load_state()
+            except EarningsStateError:
+                await send_ephemeral_rejection(
+                    interaction,
+                    "This earnings review is currently unavailable.",
+                )
+                return
+
+            found = validated_review_state_item(
                 state,
                 self.review_message_id,
+                channel_id,
+                review_channel_id,
             )
 
             if found is None:
-                await interaction.followup.send(
-                    (
-                        "⚠️ I could not find the saved "
-                        "data for this earnings review. "
-                        "Please create a fresh review test."
-                    ),
-                    ephemeral=True,
+                await send_ephemeral_rejection(
+                    interaction,
+                    "This earnings review is no longer available.",
+                )
+                return
+
+            # Acknowledge before the Discord fetch and attachment conversion.
+            await defer_ephemeral_response(interaction)
+
+            try:
+                review_channel = client.get_channel(
+                    review_channel_id
+                )
+                if review_channel is None:
+                    review_channel = await client.fetch_channel(
+                        review_channel_id
+                    )
+
+                review_message = await review_channel.fetch_message(
+                    int(self.review_message_id)
+                )
+            except Exception:
+                await send_ephemeral_rejection(
+                    interaction,
+                    "This earnings review is no longer available.",
                 )
                 return
 
             token, item = found
+
+            if not is_valid_review_message_provenance(
+                review_message,
+                message_id=self.review_message_id,
+                channel_id=review_channel_id,
+                bot_user_id=getattr(client.user, "id", None),
+                normal_message_type=discord.MessageType.default,
+            ):
+                await send_ephemeral_rejection(
+                    interaction,
+                    "This earnings review is no longer available.",
+                )
+                return
 
             if item.get(
                 "sent_to_signals"
@@ -2135,22 +2389,7 @@ async def run_review_button_bot() -> None:
                 )
                 return
 
-            candidate = item.get(
-                "candidate"
-            )
-
-            if not isinstance(
-                candidate,
-                dict,
-            ):
-                await interaction.followup.send(
-                    (
-                        "⚠️ The saved earnings review "
-                        "data is invalid."
-                    ),
-                    ephemeral=True,
-                )
-                return
+            candidate = item["candidate"]
 
             thesis = str(
                 self.trade_thesis.value
@@ -2356,16 +2595,57 @@ async def run_review_button_bot() -> None:
             interaction: discord.Interaction,
             button: discord.ui.Button,
         ):
-            # IMPORTANT: modal response happens immediately. No state-file I/O
-            # is allowed before send_modal(), avoiding Discord's 3-second timeout.
+            user = getattr(interaction, "user", None)
+            guild = getattr(interaction, "guild", None)
+            channel_id = getattr(interaction, "channel_id", None)
+            message = getattr(interaction, "message", None)
+            message_id = getattr(message, "id", None)
+
+            if not can_clear_earnings_review(user, guild):
+                await send_ephemeral_rejection(
+                    interaction,
+                    "You cannot use this earnings review action.",
+                )
+                return
+
+            try:
+                state = load_state()
+            except EarningsStateError:
+                await send_ephemeral_rejection(
+                    interaction,
+                    "This earnings review is currently unavailable.",
+                )
+                return
+
+            found = validated_review_state_item(
+                state,
+                message_id,
+                channel_id,
+                review_channel_id,
+            )
+
+            if found is None or not is_valid_review_message_provenance(
+                message,
+                message_id=message_id,
+                channel_id=review_channel_id,
+                bot_user_id=getattr(client.user, "id", None),
+                normal_message_type=discord.MessageType.default,
+            ):
+                await send_ephemeral_rejection(
+                    interaction,
+                    "This earnings review is no longer available.",
+                )
+                return
+
             print(
                 "Send to Signals clicked:",
-                interaction.message.id,
-                interaction.user,
+                message_id,
+                user,
                 flush=True,
             )
 
-            message_text = str(interaction.message.content or "")
+            _token, item = found
+            message_text = str(getattr(message, "content", "") or "")
             symbol = "Trade"
             for raw_line in message_text.splitlines():
                 line = raw_line.strip().replace("**", "")
@@ -2373,16 +2653,39 @@ async def run_review_button_bot() -> None:
                     symbol = line
                     break
 
+            candidate_symbol = str(
+                item["candidate"].get("symbol") or ""
+            ).strip()
+            if candidate_symbol:
+                symbol = candidate_symbol
+
+            if interaction_response_is_done(interaction):
+                await send_ephemeral_rejection(
+                    interaction,
+                    "This earnings review is no longer available.",
+                )
+                return
+
             try:
                 await interaction.response.send_modal(
-                    TradeThesisModal(str(interaction.message.id), symbol)
+                    TradeThesisModal(
+                        str(message_id),
+                        symbol,
+                        str(getattr(user, "id", "")),
+                    )
                 )
                 print(
                     "Trade Thesis modal opened for:",
-                    interaction.message.id,
+                    message_id,
                     symbol,
                     flush=True,
                 )
+            except discord.InteractionResponded:
+                await send_ephemeral_rejection(
+                    interaction,
+                    "This earnings review is no longer available.",
+                )
+                return
             except Exception as exc:
                 print(
                     "ERROR opening Trade Thesis modal:",

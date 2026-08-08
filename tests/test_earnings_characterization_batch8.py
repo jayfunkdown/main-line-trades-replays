@@ -454,6 +454,32 @@ class ReviewModalBoundaryTests(unittest.IsolatedAsyncioTestCase):
         signals_channel = SimpleNamespace(send=AsyncMock())
         review_channel = SimpleNamespace(fetch_message=AsyncMock())
         client = batch2.FakeDiscordClient(signals_channel, review_channel)
+        reviewer = SimpleNamespace(
+            id=1,
+            guild_permissions=SimpleNamespace(
+                administrator=False,
+                manage_messages=False,
+            ),
+        )
+        guild = SimpleNamespace(owner_id=1)
+        review_channel.fetch_message.return_value = SimpleNamespace(
+            id=321,
+            author=client.user,
+            channel=SimpleNamespace(id=200),
+            type=discord.MessageType.default,
+            edit=AsyncMock(),
+        )
+        button_state = empty_state()
+        button_state["signal_queue"]["token"] = {
+            "review_message_id": "321",
+            "review_channel_id": "200",
+            "sent_to_signals": False,
+            "candidate": {
+                "symbol": "ACME",
+                "eps_direction": "beat",
+                "revenue_direction": "beat",
+            },
+        }
 
         def required_environment(name):
             return {
@@ -475,7 +501,7 @@ class ReviewModalBoundaryTests(unittest.IsolatedAsyncioTestCase):
         ), patch.object(
             earnings_reactions,
             "load_state",
-            return_value=empty_state(),
+            return_value=button_state,
         ), patch.object(
             discord,
             "Client",
@@ -493,24 +519,42 @@ class ReviewModalBoundaryTests(unittest.IsolatedAsyncioTestCase):
             captured.modal = modal
 
         button_interaction = SimpleNamespace(
-            message=SimpleNamespace(id=321, content="**ACME**"),
-            user="Reviewer",
-            response=SimpleNamespace(send_modal=send_modal),
+            message=SimpleNamespace(
+                id=321,
+                content="**ACME**",
+                author=client.user,
+                channel=SimpleNamespace(id=200),
+                type=discord.MessageType.default,
+            ),
+            channel_id=200,
+            guild=guild,
+            user=reviewer,
+            response=SimpleNamespace(
+                send_modal=send_modal,
+                send_message=AsyncMock(),
+            ),
+            followup=SimpleNamespace(send=AsyncMock()),
         )
 
-        with redirect_stdout(StringIO()):
+        with patch.object(
+            earnings_reactions,
+            "load_state",
+            return_value=button_state,
+        ), redirect_stdout(StringIO()):
             await client.persistent_view.children[0].callback(button_interaction)
 
         captured.modal.trade_thesis._value = "Trade above resistance."
         captured.modal.trade_chart._values = [attachment]
-        return captured.modal, signals_channel
+        return captured.modal, signals_channel, reviewer, guild
 
     @staticmethod
-    def interaction():
+    def interaction(reviewer, guild):
         return SimpleNamespace(
+            channel_id=200,
+            guild=guild,
             response=SimpleNamespace(defer=AsyncMock()),
             followup=SimpleNamespace(send=AsyncMock()),
-            user="Reviewer",
+            user=reviewer,
             delete_original_response=AsyncMock(),
         )
 
@@ -520,8 +564,10 @@ class ReviewModalBoundaryTests(unittest.IsolatedAsyncioTestCase):
             content_type="image/png",
             to_file=AsyncMock(),
         )
-        modal, signals_channel = await self.build_modal(attachment)
-        interaction = self.interaction()
+        modal, signals_channel, reviewer, guild = await self.build_modal(
+            attachment
+        )
+        interaction = self.interaction(reviewer, guild)
 
         with patch.object(
             earnings_reactions,
@@ -533,12 +579,9 @@ class ReviewModalBoundaryTests(unittest.IsolatedAsyncioTestCase):
         ) as update_state:
             await modal.on_submit(interaction)
 
-        interaction.response.defer.assert_awaited_once_with(
-            ephemeral=True,
-            thinking=True,
-        )
+        interaction.response.defer.assert_not_awaited()
         self.assertIn(
-            "could not find the saved data",
+            "no longer available",
             interaction.followup.send.await_args.args[0],
         )
         attachment.to_file.assert_not_awaited()
@@ -551,8 +594,10 @@ class ReviewModalBoundaryTests(unittest.IsolatedAsyncioTestCase):
             content_type="image/png",
             to_file=AsyncMock(),
         )
-        modal, signals_channel = await self.build_modal(attachment)
-        interaction = self.interaction()
+        modal, signals_channel, reviewer, guild = await self.build_modal(
+            attachment
+        )
+        interaction = self.interaction(reviewer, guild)
 
         with patch.object(
             earnings_reactions,
@@ -561,13 +606,10 @@ class ReviewModalBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 "synthetic corrupt state"
             ),
         ):
-            with self.assertRaises(
-                earnings_state.EarningsStateValidationError
-            ):
-                await modal.on_submit(interaction)
+            await modal.on_submit(interaction)
 
         interaction.response.defer.assert_not_awaited()
-        interaction.followup.send.assert_not_awaited()
+        interaction.followup.send.assert_awaited_once()
         attachment.to_file.assert_not_awaited()
         signals_channel.send.assert_not_awaited()
 
@@ -577,11 +619,14 @@ class ReviewModalBoundaryTests(unittest.IsolatedAsyncioTestCase):
             content_type="image/png",
             to_file=AsyncMock(),
         )
-        modal, signals_channel = await self.build_modal(attachment)
-        interaction = self.interaction()
+        modal, signals_channel, reviewer, guild = await self.build_modal(
+            attachment
+        )
+        interaction = self.interaction(reviewer, guild)
         state = empty_state()
         state["signal_queue"]["token"] = {
             "review_message_id": "321",
+            "review_channel_id": "200",
             "sent_to_signals": False,
             "candidate": ["not-a-dictionary"],
         }
@@ -597,7 +642,7 @@ class ReviewModalBoundaryTests(unittest.IsolatedAsyncioTestCase):
             await modal.on_submit(interaction)
 
         self.assertIn(
-            "saved earnings review data is invalid",
+            "no longer available",
             interaction.followup.send.await_args.args[0],
         )
         attachment.to_file.assert_not_awaited()
@@ -610,13 +655,20 @@ class ReviewModalBoundaryTests(unittest.IsolatedAsyncioTestCase):
             content_type="text/plain",
             to_file=AsyncMock(),
         )
-        modal, signals_channel = await self.build_modal(attachment)
-        interaction = self.interaction()
+        modal, signals_channel, reviewer, guild = await self.build_modal(
+            attachment
+        )
+        interaction = self.interaction(reviewer, guild)
         state = empty_state()
         state["signal_queue"]["token"] = {
             "review_message_id": "321",
+            "review_channel_id": "200",
             "sent_to_signals": False,
-            "candidate": {"symbol": "ACME"},
+            "candidate": {
+                "symbol": "ACME",
+                "eps_direction": "beat",
+                "revenue_direction": "beat",
+            },
         }
 
         with patch.object(

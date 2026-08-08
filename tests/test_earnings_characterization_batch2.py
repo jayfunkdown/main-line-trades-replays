@@ -84,12 +84,13 @@ class StateWriteCharacterizationTests(NoNetworkTestCase):
                 with self.assertRaises(EarningsStateValidationError):
                     earnings_reactions.load_state()
 
-    def test_corrupt_signal_queue_fails_during_message_lookup(self):
+    def test_corrupt_signal_queue_fails_closed_during_message_lookup(self):
         state = self.empty_state()
         state["signal_queue"] = []
 
-        with self.assertRaises(AttributeError):
+        self.assertIsNone(
             earnings_reactions.find_signal_item_by_review_message(state, "123")
+        )
 
 
 class PostingFailureCharacterizationTests(NoNetworkTestCase):
@@ -383,6 +384,21 @@ class SendToSignalsCharacterizationTests(unittest.IsolatedAsyncioTestCase):
 
     async def build_modal(self, signals_channel, review_channel):
         client = FakeDiscordClient(signals_channel, review_channel)
+        reviewer = SimpleNamespace(
+            id=1,
+            guild_permissions=SimpleNamespace(
+                administrator=False,
+                manage_messages=False,
+            ),
+        )
+        guild = SimpleNamespace(owner_id=1)
+        review_channel.fetch_message.return_value = SimpleNamespace(
+            id=321,
+            author=client.user,
+            channel=SimpleNamespace(id=200),
+            type=discord.MessageType.default,
+            edit=AsyncMock(),
+        )
 
         def required_environment(name):
             return {
@@ -424,13 +440,29 @@ class SendToSignalsCharacterizationTests(unittest.IsolatedAsyncioTestCase):
             captured.modal = modal
 
         button_interaction = SimpleNamespace(
-            message=SimpleNamespace(id=321, content="**ACME**"),
-            user="Reviewer",
-            response=SimpleNamespace(send_modal=send_modal),
+            message=SimpleNamespace(
+                id=321,
+                content="**ACME**",
+                author=client.user,
+                channel=SimpleNamespace(id=200),
+                type=discord.MessageType.default,
+            ),
+            channel_id=200,
+            guild=guild,
+            user=reviewer,
+            response=SimpleNamespace(
+                send_modal=send_modal,
+                send_message=AsyncMock(),
+            ),
+            followup=SimpleNamespace(send=AsyncMock()),
         )
         button = client.persistent_view.children[0]
 
-        with redirect_stdout(StringIO()):
+        with patch.object(
+            earnings_reactions,
+            "load_state",
+            return_value=self.signal_state(sent=False),
+        ), redirect_stdout(StringIO()):
             await button.callback(button_interaction)
 
         modal = captured.modal
@@ -443,24 +475,26 @@ class SendToSignalsCharacterizationTests(unittest.IsolatedAsyncioTestCase):
                 to_file=AsyncMock(return_value="discord-file"),
             )
         ]
-        return modal, client
+        return modal, client, reviewer, guild
 
-    def submit_interaction(self):
+    def submit_interaction(self, reviewer, guild):
         return SimpleNamespace(
+            channel_id=200,
+            guild=guild,
             response=SimpleNamespace(defer=AsyncMock()),
             followup=SimpleNamespace(send=AsyncMock()),
-            user="Reviewer",
+            user=reviewer,
             delete_original_response=AsyncMock(),
         )
 
     async def test_already_sent_state_prevents_second_signal_post(self):
         signals_channel = SimpleNamespace(send=AsyncMock())
         review_channel = SimpleNamespace(fetch_message=AsyncMock())
-        modal, _client = await self.build_modal(
+        modal, _client, reviewer, guild = await self.build_modal(
             signals_channel,
             review_channel,
         )
-        interaction = self.submit_interaction()
+        interaction = self.submit_interaction(reviewer, guild)
 
         with (
             patch.object(
@@ -482,13 +516,13 @@ class SendToSignalsCharacterizationTests(unittest.IsolatedAsyncioTestCase):
     async def test_signal_post_then_save_failure_can_post_duplicate_on_retry(self):
         signals_channel = SimpleNamespace(send=AsyncMock())
         review_channel = SimpleNamespace(fetch_message=AsyncMock())
-        modal, _client = await self.build_modal(
+        modal, _client, reviewer, guild = await self.build_modal(
             signals_channel,
             review_channel,
         )
         persisted_state = self.signal_state(sent=False)
-        interaction_one = self.submit_interaction()
-        interaction_two = self.submit_interaction()
+        interaction_one = self.submit_interaction(reviewer, guild)
+        interaction_two = self.submit_interaction(reviewer, guild)
 
         with (
             patch.object(
@@ -516,7 +550,7 @@ class SendToSignalsCharacterizationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(signals_channel.send.await_count, 2)
         self.assertEqual(update_state.call_count, 2)
-        review_channel.fetch_message.assert_not_awaited()
+        self.assertEqual(review_channel.fetch_message.await_count, 2)
         self.assertFalse(
             persisted_state["signal_queue"]["token"]["sent_to_signals"]
         )
@@ -532,12 +566,12 @@ class SendToSignalsCharacterizationTests(unittest.IsolatedAsyncioTestCase):
             send=AsyncMock(side_effect=post_error)
         )
         review_channel = SimpleNamespace(fetch_message=AsyncMock())
-        modal, _client = await self.build_modal(
+        modal, _client, reviewer, guild = await self.build_modal(
             signals_channel,
             review_channel,
         )
         state = self.signal_state(sent=False)
-        interaction = self.submit_interaction()
+        interaction = self.submit_interaction(reviewer, guild)
 
         with (
             patch.object(
@@ -552,7 +586,7 @@ class SendToSignalsCharacterizationTests(unittest.IsolatedAsyncioTestCase):
 
         signals_channel.send.assert_awaited_once()
         update_state.assert_not_called()
-        review_channel.fetch_message.assert_not_awaited()
+        review_channel.fetch_message.assert_awaited_once_with(321)
         self.assertFalse(
             state["signal_queue"]["token"]["sent_to_signals"]
         )

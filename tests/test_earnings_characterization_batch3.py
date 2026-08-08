@@ -327,6 +327,13 @@ class SendToSignalsRaceAndProvenanceTests(unittest.IsolatedAsyncioTestCase):
 
     async def start_fake_bot(self, signals_channel, review_channel):
         client = batch2.FakeDiscordClient(signals_channel, review_channel)
+        review_channel.fetch_message.return_value = SimpleNamespace(
+            id=321,
+            author=client.user,
+            channel=SimpleNamespace(id=200),
+            type=discord.MessageType.default,
+            edit=AsyncMock(),
+        )
 
         def required_environment(name):
             return {
@@ -372,23 +379,11 @@ class SendToSignalsRaceAndProvenanceTests(unittest.IsolatedAsyncioTestCase):
         channel_id=200,
         attachment=None,
     ):
-        captured = SimpleNamespace(modal=None)
-
-        async def send_modal(modal):
-            captured.modal = modal
-
-        interaction = SimpleNamespace(
-            message=SimpleNamespace(id=321, content="**ACME**"),
+        modal, _interaction = await self.click_button(
+            client,
+            user=user,
             channel_id=channel_id,
-            user=user or "Reviewer",
-            response=SimpleNamespace(send_modal=send_modal),
         )
-        button = client.persistent_view.children[0]
-
-        with redirect_stdout(StringIO()):
-            await button.callback(interaction)
-
-        modal = captured.modal
         self.assertIsNotNone(modal)
         modal.trade_thesis._value = "Trade above resistance."
         modal.trade_chart._values = [
@@ -401,12 +396,68 @@ class SendToSignalsRaceAndProvenanceTests(unittest.IsolatedAsyncioTestCase):
         ]
         return modal
 
+    async def click_button(
+        self,
+        client,
+        *,
+        user=None,
+        channel_id=200,
+    ):
+        captured = SimpleNamespace(modal=None)
+
+        async def send_modal(modal):
+            captured.modal = modal
+
+        reviewer = user or SimpleNamespace(
+            id=1,
+            guild_permissions=SimpleNamespace(
+                administrator=False,
+                manage_messages=False,
+            ),
+        )
+
+        interaction = SimpleNamespace(
+            message=SimpleNamespace(
+                id=321,
+                content="**ACME**",
+                author=client.user,
+                channel=SimpleNamespace(id=channel_id),
+                type=discord.MessageType.default,
+            ),
+            channel_id=channel_id,
+            guild=SimpleNamespace(owner_id=1),
+            user=reviewer,
+            response=SimpleNamespace(
+                send_modal=send_modal,
+                send_message=AsyncMock(),
+            ),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        button = client.persistent_view.children[0]
+
+        with patch.object(
+            earnings_reactions,
+            "load_state",
+            return_value=self.signal_state(sent=False),
+        ), redirect_stdout(StringIO()):
+            await button.callback(interaction)
+
+        return captured.modal, interaction
+
     def submit_interaction(self, *, channel_id=200, user=None):
+        reviewer = user or SimpleNamespace(
+            id=1,
+            guild_permissions=SimpleNamespace(
+                administrator=False,
+                manage_messages=False,
+            ),
+        )
         return SimpleNamespace(
             channel_id=channel_id,
+            guild=SimpleNamespace(owner_id=1),
             response=SimpleNamespace(defer=AsyncMock()),
             followup=SimpleNamespace(send=AsyncMock()),
-            user=user or "Reviewer",
+            user=reviewer,
             delete_original_response=AsyncMock(),
         )
 
@@ -452,15 +503,24 @@ class SendToSignalsRaceAndProvenanceTests(unittest.IsolatedAsyncioTestCase):
         async def send_signal(**kwargs):
             events.append("signal-posted")
 
-        async def fail_review_fetch(message_id):
-            events.append("review-update-attempted")
-            raise RuntimeError("simulated review update failure")
-
         signals_channel = SimpleNamespace(send=AsyncMock(side_effect=send_signal))
         review_channel = SimpleNamespace(
-            fetch_message=AsyncMock(side_effect=fail_review_fetch)
+            fetch_message=AsyncMock()
         )
         client = await self.start_fake_bot(signals_channel, review_channel)
+        valid_review_message = review_channel.fetch_message.return_value
+
+        fetch_count = 0
+
+        async def fetch_review_message(message_id):
+            nonlocal fetch_count
+            fetch_count += 1
+            if fetch_count == 2:
+                events.append("review-update-attempted")
+                raise RuntimeError("simulated review update failure")
+            return valid_review_message
+
+        review_channel.fetch_message.side_effect = fetch_review_message
         modal = await self.open_modal(client)
         state = self.signal_state(sent=False)
 
@@ -494,7 +554,7 @@ class SendToSignalsRaceAndProvenanceTests(unittest.IsolatedAsyncioTestCase):
         update_state.assert_called_once()
         first_interaction.delete_original_response.assert_awaited_once()
 
-    async def test_button_opens_modal_without_channel_or_staff_check(self):
+    async def test_button_rejects_wrong_channel_and_unprivileged_user(self):
         signals_channel = SimpleNamespace(send=AsyncMock())
         review_channel = SimpleNamespace(fetch_message=AsyncMock())
         client = await self.start_fake_bot(signals_channel, review_channel)
@@ -506,15 +566,17 @@ class SendToSignalsRaceAndProvenanceTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        modal = await self.open_modal(
+        modal, interaction = await self.click_button(
             client,
             user=unprivileged_user,
             channel_id=999,
         )
 
-        self.assertEqual(modal.review_message_id, "321")
+        self.assertIsNone(modal)
+        interaction.response.send_message.assert_awaited_once()
+        signals_channel.send.assert_not_awaited()
 
-    async def test_modal_uses_message_id_without_channel_or_staff_check(self):
+    async def test_modal_rejects_wrong_channel_and_unprivileged_user(self):
         signals_channel = SimpleNamespace(send=AsyncMock())
         review_message = SimpleNamespace(edit=AsyncMock())
         review_channel = SimpleNamespace(
@@ -528,12 +590,12 @@ class SendToSignalsRaceAndProvenanceTests(unittest.IsolatedAsyncioTestCase):
                 manage_messages=False,
             ),
         )
-        modal = await self.open_modal(
-            client,
-            user=unprivileged_user,
-            channel_id=999,
-        )
+        modal = await self.open_modal(client)
         state = self.signal_state(sent=False)
+        interaction = self.submit_interaction(
+            channel_id=999,
+            user=unprivileged_user,
+        )
 
         with (
             patch.dict(os.environ, {}, clear=True),
@@ -549,16 +611,12 @@ class SendToSignalsRaceAndProvenanceTests(unittest.IsolatedAsyncioTestCase):
             ) as update_state,
             redirect_stdout(StringIO()),
         ):
-            await modal.on_submit(
-                self.submit_interaction(
-                    channel_id=999,
-                    user=unprivileged_user,
-                )
-            )
+            await modal.on_submit(interaction)
 
-        signals_channel.send.assert_awaited_once()
-        update_state.assert_called_once()
-        self.assertTrue(state["signal_queue"]["token"]["sent_to_signals"])
+        interaction.followup.send.assert_awaited_once()
+        signals_channel.send.assert_not_awaited()
+        update_state.assert_not_called()
+        self.assertFalse(state["signal_queue"]["token"]["sent_to_signals"])
 
 
 if __name__ == "__main__":
