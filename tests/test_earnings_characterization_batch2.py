@@ -1,0 +1,557 @@
+import copy
+import json
+import os
+import sys
+import tempfile
+import unittest
+from contextlib import ExitStack, redirect_stdout
+from io import StringIO
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
+
+import discord
+
+with patch("dotenv.load_dotenv"):
+    from scripts import earnings_reactions
+
+
+class NoNetworkTestCase(unittest.TestCase):
+    def setUp(self):
+        self.urlopen_patcher = patch.object(
+            earnings_reactions.urllib.request,
+            "urlopen",
+            side_effect=AssertionError("Tests must not make network requests"),
+        )
+        self.urlopen_patcher.start()
+        self.addCleanup(self.urlopen_patcher.stop)
+
+
+class StateWriteCharacterizationTests(NoNetworkTestCase):
+    def empty_state(self):
+        return {
+            "public": {},
+            "private": {},
+            "quotes": {},
+            "signal_queue": {},
+        }
+
+    def test_stale_earnings_write_overwrites_review_bot_update(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "state.json"
+            original = self.empty_state()
+            original["signal_queue"]["token"] = {
+                "review_message_id": "123",
+                "sent_to_signals": False,
+            }
+
+            with patch.object(earnings_reactions, "STATE_FILE", state_path):
+                earnings_reactions.save_state(original)
+
+                earnings_snapshot = earnings_reactions.load_state()
+                review_snapshot = earnings_reactions.load_state()
+
+                review_snapshot["signal_queue"]["token"][
+                    "sent_to_signals"
+                ] = True
+                earnings_reactions.save_state(review_snapshot)
+
+                earnings_snapshot["public"]["report-key"] = {
+                    "symbol": "ACME"
+                }
+                earnings_reactions.save_state(earnings_snapshot)
+
+                final_state = earnings_reactions.load_state()
+
+            self.assertFalse(
+                final_state["signal_queue"]["token"]["sent_to_signals"]
+            )
+            self.assertIn("report-key", final_state["public"])
+
+    def test_load_state_preserves_corrupt_nested_section_types(self):
+        corrupt_state = {
+            "public": [],
+            "private": "invalid",
+            "quotes": None,
+            "signal_queue": ["invalid"],
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "state.json"
+            state_path.write_text(json.dumps(corrupt_state), encoding="utf-8")
+
+            with patch.object(earnings_reactions, "STATE_FILE", state_path):
+                loaded = earnings_reactions.load_state()
+
+        self.assertEqual(loaded, corrupt_state)
+
+    def test_corrupt_signal_queue_fails_during_message_lookup(self):
+        state = self.empty_state()
+        state["signal_queue"] = []
+
+        with self.assertRaises(AttributeError):
+            earnings_reactions.find_signal_item_by_review_message(state, "123")
+
+
+class PostingFailureCharacterizationTests(NoNetworkTestCase):
+    TARGET_DATE = "2026-08-06"
+
+    def setUp(self):
+        super().setUp()
+        self.report = {
+            "date": self.TARGET_DATE,
+            "symbol": "ACME",
+            "year": 2026,
+            "quarter": 2,
+        }
+        self.candidate = {
+            "symbol": "ACME",
+            "score": 100.0,
+            "move_percent": 10.0,
+            "report": self.report,
+        }
+        self.key = earnings_reactions.report_key(self.report)
+
+    def empty_state(self):
+        return {
+            "public": {},
+            "private": {},
+            "quotes": {},
+            "signal_queue": {},
+        }
+
+    def main_patches(self, state_path, send_private, send_public, *, force=False):
+        arguments = [
+            "earnings_reactions.py",
+            "--post",
+            "--date",
+            self.TARGET_DATE,
+        ]
+        if force:
+            arguments.append("--force")
+
+        return (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(sys, "argv", arguments),
+            patch.object(earnings_reactions, "STATE_FILE", state_path),
+            patch.object(
+                earnings_reactions,
+                "get_completed_reports",
+                return_value=[self.report],
+            ),
+            patch.object(
+                earnings_reactions,
+                "build_candidates_optimized",
+                return_value=([self.candidate], 0, 0),
+            ),
+            patch.object(
+                earnings_reactions,
+                "qualifies_for_private",
+                return_value=True,
+            ),
+            patch.object(
+                earnings_reactions,
+                "qualifies_for_public",
+                return_value=True,
+            ),
+            patch.object(
+                earnings_reactions,
+                "required_env",
+                return_value="public-webhook",
+            ),
+            patch.object(
+                earnings_reactions,
+                "send_private_review_with_chart",
+                send_private,
+            ),
+            patch.object(
+                earnings_reactions,
+                "send_discord_message",
+                send_public,
+            ),
+            patch.object(
+                earnings_reactions,
+                "build_public_message",
+                return_value="public message",
+            ),
+            patch.object(earnings_reactions.time, "sleep"),
+        )
+
+    def test_successful_public_post_then_save_failure_allows_duplicate_retry(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "state.json"
+            state_path.write_text(
+                json.dumps(self.empty_state()),
+                encoding="utf-8",
+            )
+            send_private = Mock()
+            send_public = Mock()
+            real_save_state = earnings_reactions.save_state
+            save_calls = 0
+
+            def fail_second_save(state):
+                nonlocal save_calls
+                save_calls += 1
+                if save_calls == 2:
+                    raise OSError("simulated state save failure")
+                real_save_state(state)
+
+            patches = self.main_patches(
+                state_path,
+                send_private,
+                send_public,
+            )
+            with ExitStack() as stack:
+                for manager in patches:
+                    stack.enter_context(manager)
+                stack.enter_context(
+                    patch.object(
+                        earnings_reactions,
+                        "save_state",
+                        side_effect=fail_second_save,
+                    )
+                )
+                stack.enter_context(redirect_stdout(StringIO()))
+                with self.assertRaisesRegex(OSError, "state save failure"):
+                    earnings_reactions.main()
+
+            self.assertEqual(send_public.call_count, 1)
+            persisted_after_failure = json.loads(
+                state_path.read_text(encoding="utf-8")
+            )
+            self.assertNotIn(self.key, persisted_after_failure["public"])
+
+            patches = self.main_patches(
+                state_path,
+                send_private,
+                send_public,
+            )
+            with ExitStack() as stack:
+                for manager in patches:
+                    stack.enter_context(manager)
+                stack.enter_context(redirect_stdout(StringIO()))
+                earnings_reactions.main()
+
+            self.assertEqual(send_public.call_count, 2)
+            persisted_after_retry = json.loads(
+                state_path.read_text(encoding="utf-8")
+            )
+            self.assertIn(self.key, persisted_after_retry["public"])
+
+    def test_force_reposts_saved_private_and_public_candidates(self):
+        state = self.empty_state()
+        state["private"][self.key] = {"symbol": "ACME"}
+        state["public"][self.key] = {"symbol": "ACME"}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "state.json"
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            send_private = Mock()
+            send_public = Mock()
+            patches = self.main_patches(
+                state_path,
+                send_private,
+                send_public,
+                force=True,
+            )
+
+            with ExitStack() as stack:
+                stack.enter_context(
+                    patch.dict(
+                        os.environ,
+                        {"EARNINGS_REVIEW_WEBHOOK": "review-webhook"},
+                        clear=True,
+                    )
+                )
+                for manager in patches[1:]:
+                    stack.enter_context(manager)
+                stack.enter_context(redirect_stdout(StringIO()))
+                earnings_reactions.main()
+
+        send_private.assert_called_once()
+        send_public.assert_called_once_with(
+            "public-webhook",
+            "public message",
+            earnings_reactions.PUBLIC_WEBHOOK_USERNAME,
+        )
+
+    def test_corrupt_public_section_posts_then_fails_recording_duplicate_key(self):
+        state = self.empty_state()
+        state["public"] = []
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "state.json"
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            send_private = Mock()
+            send_public = Mock()
+            patches = self.main_patches(
+                state_path,
+                send_private,
+                send_public,
+            )
+
+            with ExitStack() as stack:
+                for manager in patches:
+                    stack.enter_context(manager)
+                stack.enter_context(redirect_stdout(StringIO()))
+                with self.assertRaises(TypeError):
+                    earnings_reactions.main()
+
+        send_public.assert_called_once()
+
+
+class FakeCommandTree:
+    def __init__(self, client):
+        self.client = client
+        self.commands = {}
+
+    def command(self, *, name, description):
+        def decorator(function):
+            self.commands[name] = function
+            return function
+
+        return decorator
+
+    async def sync(self):
+        return list(self.commands.values())
+
+
+class FakeDiscordClient:
+    def __init__(self, signals_channel, review_channel):
+        self.signals_channel = signals_channel
+        self.review_channel = review_channel
+        self.guilds = []
+        self.user = SimpleNamespace(id=999, __str__=lambda self: "Test Bot")
+        self.persistent_view = None
+        self.started_with = None
+
+    def event(self, function):
+        setattr(self, function.__name__, function)
+        return function
+
+    def add_view(self, view):
+        self.persistent_view = view
+
+    def get_channel(self, channel_id):
+        if channel_id == 100:
+            return self.signals_channel
+        if channel_id == 200:
+            return self.review_channel
+        return None
+
+    async def fetch_channel(self, channel_id):
+        return self.get_channel(channel_id)
+
+    async def start(self, token):
+        self.started_with = token
+
+
+class SendToSignalsCharacterizationTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.urlopen_patcher = patch.object(
+            earnings_reactions.urllib.request,
+            "urlopen",
+            side_effect=AssertionError("Tests must not make network requests"),
+        )
+        self.urlopen_patcher.start()
+        self.addCleanup(self.urlopen_patcher.stop)
+
+    def signal_state(self, *, sent=False):
+        return {
+            "public": {},
+            "private": {},
+            "quotes": {},
+            "signal_queue": {
+                "token": {
+                    "review_message_id": "321",
+                    "review_channel_id": "200",
+                    "sent_to_signals": sent,
+                    "candidate": {
+                        "symbol": "ACME",
+                        "move_percent": 10.0,
+                        "current_price": 25.0,
+                        "eps_surprise": 5.0,
+                        "revenue_surprise": 4.0,
+                        "eps_direction": "beat",
+                        "revenue_direction": "beat",
+                    },
+                }
+            },
+        }
+
+    async def build_modal(self, signals_channel, review_channel):
+        client = FakeDiscordClient(signals_channel, review_channel)
+
+        def required_environment(name):
+            return {
+                "DISCORD_BOT_TOKEN": "test-token",
+                "SIGNALS_CHANNEL_ID": "100",
+                "EARNINGS_REVIEW_WEBHOOK": "test-webhook",
+            }[name]
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(
+                earnings_reactions,
+                "required_env",
+                side_effect=required_environment,
+            ),
+            patch.object(
+                earnings_reactions,
+                "resolve_webhook_channel_id",
+                return_value="200",
+            ),
+            patch.object(discord, "Client", return_value=client),
+            patch.object(
+                discord.app_commands,
+                "CommandTree",
+                FakeCommandTree,
+            ),
+            redirect_stdout(StringIO()),
+        ):
+            await earnings_reactions.run_review_button_bot()
+
+        captured = SimpleNamespace(modal=None)
+
+        async def send_modal(modal):
+            captured.modal = modal
+
+        button_interaction = SimpleNamespace(
+            message=SimpleNamespace(id=321, content="**ACME**"),
+            user="Reviewer",
+            response=SimpleNamespace(send_modal=send_modal),
+        )
+        button = client.persistent_view.children[0]
+
+        with redirect_stdout(StringIO()):
+            await button.callback(button_interaction)
+
+        modal = captured.modal
+        self.assertIsNotNone(modal)
+        modal.trade_thesis._value = "Trade above resistance."
+        modal.trade_chart._values = [
+            SimpleNamespace(
+                filename="chart.png",
+                content_type="image/png",
+                to_file=AsyncMock(return_value="discord-file"),
+            )
+        ]
+        return modal, client
+
+    def submit_interaction(self):
+        return SimpleNamespace(
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+            user="Reviewer",
+            delete_original_response=AsyncMock(),
+        )
+
+    async def test_already_sent_state_prevents_second_signal_post(self):
+        signals_channel = SimpleNamespace(send=AsyncMock())
+        review_channel = SimpleNamespace(fetch_message=AsyncMock())
+        modal, _client = await self.build_modal(
+            signals_channel,
+            review_channel,
+        )
+        interaction = self.submit_interaction()
+
+        with (
+            patch.object(
+                earnings_reactions,
+                "load_state",
+                return_value=self.signal_state(sent=True),
+            ),
+            patch.object(earnings_reactions, "save_state") as save_state,
+        ):
+            await modal.on_submit(interaction)
+
+        signals_channel.send.assert_not_awaited()
+        save_state.assert_not_called()
+        self.assertIn(
+            "already",
+            interaction.followup.send.await_args.args[0].lower(),
+        )
+
+    async def test_signal_post_then_save_failure_can_post_duplicate_on_retry(self):
+        signals_channel = SimpleNamespace(send=AsyncMock())
+        review_channel = SimpleNamespace(fetch_message=AsyncMock())
+        modal, _client = await self.build_modal(
+            signals_channel,
+            review_channel,
+        )
+        persisted_state = self.signal_state(sent=False)
+        interaction_one = self.submit_interaction()
+        interaction_two = self.submit_interaction()
+
+        with (
+            patch.object(
+                earnings_reactions,
+                "load_state",
+                side_effect=[
+                    copy.deepcopy(persisted_state),
+                    copy.deepcopy(persisted_state),
+                ],
+            ),
+            patch.object(
+                earnings_reactions,
+                "save_state",
+                side_effect=OSError("simulated state save failure"),
+            ) as save_state,
+            redirect_stdout(StringIO()),
+        ):
+            with self.assertRaisesRegex(OSError, "state save failure"):
+                await modal.on_submit(interaction_one)
+            with self.assertRaisesRegex(OSError, "state save failure"):
+                await modal.on_submit(interaction_two)
+
+        self.assertEqual(signals_channel.send.await_count, 2)
+        self.assertEqual(save_state.call_count, 2)
+        review_channel.fetch_message.assert_not_awaited()
+        self.assertFalse(
+            persisted_state["signal_queue"]["token"]["sent_to_signals"]
+        )
+
+    async def test_signal_post_failure_does_not_mark_or_save_state(self):
+        response = SimpleNamespace(
+            status=500,
+            reason="Server Error",
+            headers={},
+        )
+        post_error = discord.HTTPException(response, "simulated failure")
+        signals_channel = SimpleNamespace(
+            send=AsyncMock(side_effect=post_error)
+        )
+        review_channel = SimpleNamespace(fetch_message=AsyncMock())
+        modal, _client = await self.build_modal(
+            signals_channel,
+            review_channel,
+        )
+        state = self.signal_state(sent=False)
+        interaction = self.submit_interaction()
+
+        with (
+            patch.object(
+                earnings_reactions,
+                "load_state",
+                return_value=state,
+            ),
+            patch.object(earnings_reactions, "save_state") as save_state,
+            redirect_stdout(StringIO()),
+        ):
+            await modal.on_submit(interaction)
+
+        signals_channel.send.assert_awaited_once()
+        save_state.assert_not_called()
+        review_channel.fetch_message.assert_not_awaited()
+        self.assertFalse(
+            state["signal_queue"]["token"]["sent_to_signals"]
+        )
+        self.assertNotIn("trade_thesis", state["signal_queue"]["token"])
+        self.assertIn(
+            "rejected",
+            interaction.followup.send.await_args.args[0].lower(),
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
