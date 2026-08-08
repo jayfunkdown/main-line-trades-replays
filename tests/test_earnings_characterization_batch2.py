@@ -177,7 +177,7 @@ class PostingFailureCharacterizationTests(NoNetworkTestCase):
             patch.object(earnings_reactions.time, "sleep"),
         )
 
-    def test_successful_public_post_then_save_failure_allows_duplicate_retry(self):
+    def test_successful_public_post_then_confirmation_failure_blocks_retry(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / "state.json"
             state_path.write_text(
@@ -191,14 +191,27 @@ class PostingFailureCharacterizationTests(NoNetworkTestCase):
                 send_private,
                 send_public,
             )
+            original_transition = earnings_reactions.transition_feed_delivery
+
+            def fail_confirmation(feed, key, attempt_id, status, **kwargs):
+                if status == earnings_reactions.FEED_DELIVERY_CONFIRMED:
+                    raise OSError("simulated state save failure")
+                return original_transition(
+                    feed,
+                    key,
+                    attempt_id,
+                    status,
+                    **kwargs,
+                )
+
             with ExitStack() as stack:
                 for manager in patches:
                     stack.enter_context(manager)
                 stack.enter_context(
                     patch.object(
                         earnings_reactions,
-                        "set_state_record",
-                        side_effect=OSError("simulated state save failure"),
+                        "transition_feed_delivery",
+                        side_effect=fail_confirmation,
                     )
                 )
                 stack.enter_context(redirect_stdout(StringIO()))
@@ -209,7 +222,10 @@ class PostingFailureCharacterizationTests(NoNetworkTestCase):
             persisted_after_failure = json.loads(
                 state_path.read_text(encoding="utf-8")
             )
-            self.assertNotIn(self.key, persisted_after_failure["public"])
+            self.assertEqual(
+                persisted_after_failure["public"][self.key]["delivery_status"],
+                earnings_reactions.FEED_DELIVERY_RESERVED,
+            )
 
             patches = self.main_patches(
                 state_path,
@@ -222,16 +238,23 @@ class PostingFailureCharacterizationTests(NoNetworkTestCase):
                 stack.enter_context(redirect_stdout(StringIO()))
                 earnings_reactions.main()
 
-            self.assertEqual(send_public.call_count, 2)
+            self.assertEqual(send_public.call_count, 1)
             persisted_after_retry = json.loads(
                 state_path.read_text(encoding="utf-8")
             )
-            self.assertIn(self.key, persisted_after_retry["public"])
+            self.assertEqual(
+                persisted_after_retry["public"][self.key]["delivery_status"],
+                earnings_reactions.FEED_DELIVERY_RESERVED,
+            )
 
     def test_force_reposts_saved_private_and_public_candidates(self):
         state = self.empty_state()
-        state["private"][self.key] = {"symbol": "ACME"}
-        state["public"][self.key] = {"symbol": "ACME"}
+        legacy_record = {
+            "symbol": "ACME",
+            "posted_at": "2026-08-07T08:00:00-04:00",
+        }
+        state["private"][self.key] = copy.deepcopy(legacy_record)
+        state["public"][self.key] = copy.deepcopy(legacy_record)
 
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / "state.json"

@@ -278,7 +278,7 @@ class DiscordRetryMetadataTests(NoNetworkTestCase):
 
 
 class DiscordStatusTests(NoNetworkTestCase):
-    def test_status_200_and_204_are_both_accepted_without_reading_body(self):
+    def test_status_200_and_204_are_both_accepted(self):
         for status in (200, 204):
             with self.subTest(status=status), patch.object(
                 earnings_reactions.urllib.request,
@@ -442,7 +442,7 @@ class PrivateDeliveryFailureTests(NoNetworkTestCase):
         self.assertEqual(state, empty_state())
         set_record.assert_not_called()
 
-    def test_private_success_without_message_id_is_saved_with_empty_id(self):
+    def test_private_success_without_message_id_is_ambiguous_and_not_saved(self):
         state = empty_state()
 
         def store_record(section, key, value):
@@ -458,25 +458,16 @@ class PrivateDeliveryFailureTests(NoNetworkTestCase):
             "set_state_record",
             side_effect=store_record,
         ) as set_record:
-            message_id = earnings_reactions.send_private_review_with_chart(
-                candidate(),
-                1,
-                state,
-            )
+            with self.assertRaises(earnings_reactions.AmbiguousDeliveryError):
+                earnings_reactions.send_private_review_with_chart(
+                    candidate(),
+                    1,
+                    state,
+                )
 
-        token = earnings_reactions.candidate_button_token(candidate())
-        self.assertEqual(message_id, "")
-        self.assertEqual(
-            state["signal_queue"][token]["review_message_id"],
-            "",
-        )
-        self.assertEqual(
-            state["signal_queue"][token]["review_channel_id"],
-            "review-channel",
-        )
-        self.assertFalse(state["signal_queue"][token]["sent_to_signals"])
+        self.assertEqual(state["signal_queue"], {})
+        set_record.assert_not_called()
         urlopen.assert_called_once()
-        set_record.assert_called_once()
 
 
 class CalendarDirectoryFailureTests(NoNetworkTestCase):
@@ -591,12 +582,19 @@ class PrivateThenPublicFailureTests(NoNetworkTestCase):
         report_key = earnings_reactions.report_key(item["report"])
         token = earnings_reactions.candidate_button_token(item)
         self.assertEqual(urlopen.call_count, 3)
-        self.assertEqual(update_state.call_count, 3)
+        self.assertEqual(update_state.call_count, 2)
         sleep.assert_called_once_with(
             earnings_reactions.DISCORD_POST_DELAY_SECONDS
         )
         self.assertIn(report_key, persisted["private"])
-        self.assertEqual(persisted["public"], {})
+        self.assertEqual(
+            persisted["private"][report_key]["delivery_status"],
+            earnings_reactions.FEED_DELIVERY_CONFIRMED,
+        )
+        self.assertEqual(
+            persisted["public"][report_key]["delivery_status"],
+            earnings_reactions.FEED_DELIVERY_FAILED,
+        )
         self.assertEqual(
             persisted["signal_queue"][token]["review_message_id"],
             "review-message",

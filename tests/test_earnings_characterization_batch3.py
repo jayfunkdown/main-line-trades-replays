@@ -102,7 +102,10 @@ class PrivateReviewPersistenceTests(NoNetworkTestCase):
                     side_effect=OSError("simulated state save failure"),
                 ) as set_record,
             ):
-                with self.assertRaisesRegex(OSError, "state save failure"):
+                with self.assertRaisesRegex(
+                    earnings_reactions.AmbiguousDeliveryError,
+                    "review state could not be confirmed",
+                ):
                     earnings_reactions.send_private_review_with_chart(
                         self.candidate(),
                         1,

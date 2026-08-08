@@ -527,7 +527,14 @@ class PartialPostingFailureTests(NoNetworkTestCase):
         first_key = earnings_reactions.report_key(first["report"])
         second_key = earnings_reactions.report_key(second["report"])
         self.assertIn(first_key, state["public"])
-        self.assertNotIn(second_key, state["public"])
+        self.assertEqual(
+            state["public"][first_key]["delivery_status"],
+            earnings_reactions.FEED_DELIVERY_CONFIRMED,
+        )
+        self.assertEqual(
+            state["public"][second_key]["delivery_status"],
+            earnings_reactions.FEED_DELIVERY_FAILED,
+        )
         self.assertEqual(state["private"], {})
         self.assertEqual(send_message.call_count, 2)
         send_private.assert_not_called()

@@ -115,6 +115,26 @@ SIGNAL_DELIVERY_STATUSES = {
     SIGNAL_DELIVERY_UNKNOWN,
 }
 
+FEED_DELIVERY_RESERVED = "reserved"
+FEED_DELIVERY_CONFIRMED = "confirmed"
+FEED_DELIVERY_FAILED = "failed"
+FEED_DELIVERY_UNKNOWN = "unknown"
+FEED_DELIVERY_INVALID = "invalid"
+FEED_DELIVERY_STATUSES = {
+    FEED_DELIVERY_RESERVED,
+    FEED_DELIVERY_CONFIRMED,
+    FEED_DELIVERY_FAILED,
+    FEED_DELIVERY_UNKNOWN,
+}
+
+
+class DefiniteDeliveryError(RuntimeError):
+    """Discord definitely did not accept the delivery."""
+
+
+class AmbiguousDeliveryError(RuntimeError):
+    """Discord may have accepted the delivery; automatic retry is unsafe."""
+
 
 PRIORITY_TICKERS = {
     "AAPL",
@@ -1541,16 +1561,28 @@ def send_private_review_with_chart(
             errors="replace",
         )
 
-        raise RuntimeError(
+        raise DefiniteDeliveryError(
             "Discord bot could not post the "
             "private earnings review: "
             f"HTTP {exc.code}: {error_body}"
         ) from exc
 
+    if not isinstance(response_payload, dict):
+        raise AmbiguousDeliveryError(
+            "Discord accepted the private earnings review, "
+            "but returned an unexpected response."
+        )
+
     message_id = str(
         response_payload.get("id")
         or ""
     )
+
+    if not message_id:
+        raise AmbiguousDeliveryError(
+            "Discord accepted the private earnings review, "
+            "but did not return a message ID."
+        )
 
     queue_item = {
         "candidate": (
@@ -1573,11 +1605,17 @@ def send_private_review_with_chart(
         "delivery_status": SIGNAL_DELIVERY_READY,
     }
 
-    latest_state = set_state_record(
-        "signal_queue",
-        token,
-        queue_item,
-    )
+    try:
+        latest_state = set_state_record(
+            "signal_queue",
+            token,
+            queue_item,
+        )
+    except Exception as exc:
+        raise AmbiguousDeliveryError(
+            "Discord accepted the private earnings review, "
+            "but its review state could not be confirmed."
+        ) from exc
     state.clear()
     state.update(latest_state)
 
@@ -1619,14 +1657,60 @@ def private_test_candidate() -> dict[str, Any]:
 
 
 def run_private_test() -> None:
-    state = load_state()
     candidate = private_test_candidate()
-
-    message_id = send_private_review_with_chart(
-        candidate,
-        1,
-        state,
+    key = "private-test:" + report_key(candidate["report"])
+    state, reservation_status, attempt_id = reserve_feed_delivery(
+        "private",
+        key,
+        candidate["symbol"],
+        force=True,
     )
+    if (
+        reservation_status != FEED_DELIVERY_RESERVED
+        or attempt_id is None
+    ):
+        raise RuntimeError(
+            "The private test delivery is already reserved or has an "
+            "unknown outcome; reconcile its state before retrying."
+        )
+
+    try:
+        message_id = send_private_review_with_chart(
+            candidate,
+            1,
+            state,
+        )
+    except asyncio.CancelledError as exc:
+        transition_feed_delivery(
+            "private",
+            key,
+            attempt_id,
+            FEED_DELIVERY_UNKNOWN,
+            error=concise_delivery_error(exc),
+        )
+        raise
+    except Exception as exc:
+        transition_feed_delivery(
+            "private",
+            key,
+            attempt_id,
+            failed_feed_delivery_status(exc),
+            error=concise_delivery_error(exc),
+        )
+        raise
+
+    _state, confirmed = transition_feed_delivery(
+        "private",
+        key,
+        attempt_id,
+        FEED_DELIVERY_CONFIRMED,
+        discord_message_id=message_id,
+    )
+    if not confirmed:
+        raise EarningsStateError(
+            "Private test delivery confirmation no longer matches "
+            "its reservation."
+        )
 
     print(
         "Private earnings review test posted "
@@ -3209,7 +3293,7 @@ def send_discord_message(
     webhook_url: str,
     message: str,
     username: str,
-) -> None:
+) -> str | None:
     payload = json.dumps(
         {
             "username": username,
@@ -3232,15 +3316,26 @@ def send_discord_message(
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 if response.status not in (200, 204):
-                    raise RuntimeError(
+                    raise AmbiguousDeliveryError(
                         f"Discord returned HTTP {response.status}."
                     )
-                return
+                if response.status == 200:
+                    try:
+                        response_payload = json.loads(
+                            response.read().decode("utf-8")
+                        )
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        return None
+                    if isinstance(response_payload, dict):
+                        message_id = response_payload.get("id")
+                        if message_id:
+                            return str(message_id)
+                return None
 
         except urllib.error.HTTPError as exc:
             if exc.code != 429 or attempt >= MAX_DISCORD_ATTEMPTS:
                 body = exc.read().decode("utf-8", errors="replace")
-                raise RuntimeError(
+                raise DefiniteDeliveryError(
                     f"Discord returned HTTP {exc.code}: {body}"
                 ) from exc
 
@@ -3251,7 +3346,7 @@ def send_discord_message(
             )
             time.sleep(wait_seconds)
 
-    raise RuntimeError("Discord post failed after retries.")
+    raise DefiniteDeliveryError("Discord post failed after retries.")
 
 
 def earnings_state_store() -> EarningsStateStore:
@@ -3282,6 +3377,210 @@ def set_state_record(
         state[section][key] = stored_value
 
     return update_state(mutation)
+
+
+def feed_delivery_status(
+    record: Any,
+    *,
+    feed: str | None = None,
+    report_key_value: str | None = None,
+) -> str | None:
+    """Resolve feed delivery state while treating legacy records as sent."""
+    if record is None:
+        return None
+    if not isinstance(record, dict):
+        return FEED_DELIVERY_INVALID
+
+    if "delivery_status" not in record:
+        symbol = record.get("symbol")
+        posted_at = record.get("posted_at")
+        if (
+            not isinstance(symbol, str)
+            or not symbol.strip()
+            or not isinstance(posted_at, str)
+            or not posted_at.strip()
+            or parse_iso_datetime(posted_at) is None
+        ):
+            return FEED_DELIVERY_INVALID
+        return FEED_DELIVERY_CONFIRMED
+
+    status = record["delivery_status"]
+    if status not in FEED_DELIVERY_STATUSES:
+        return FEED_DELIVERY_INVALID
+
+    required_strings = (
+        "feed",
+        "report_key",
+        "symbol",
+        "delivery_attempt_id",
+        "reserved_at",
+    )
+    if any(
+        not isinstance(record.get(field), str)
+        or not record[field].strip()
+        for field in required_strings
+    ):
+        return FEED_DELIVERY_INVALID
+    if parse_iso_datetime(record["reserved_at"]) is None:
+        return FEED_DELIVERY_INVALID
+    if feed is not None and record["feed"] != feed:
+        return FEED_DELIVERY_INVALID
+    if (
+        report_key_value is not None
+        and record["report_key"] != report_key_value
+    ):
+        return FEED_DELIVERY_INVALID
+
+    return status
+
+
+def reserve_feed_delivery(
+    feed: str,
+    key: str,
+    symbol: str,
+    *,
+    force: bool = False,
+    attempt_id: str | None = None,
+    reserved_at: str | None = None,
+) -> tuple[dict[str, Any], str, str | None]:
+    """Atomically reserve one public/private delivery before external work."""
+    if feed not in {"public", "private"}:
+        raise ValueError(f"Unsupported earnings feed: {feed}")
+
+    new_attempt_id = attempt_id or uuid.uuid4().hex
+    reservation_time = reserved_at or datetime.now(EASTERN).isoformat()
+    outcome: str | None = None
+    claimed = False
+
+    def mutation(state: dict[str, Any]) -> None:
+        nonlocal claimed, outcome
+        existing = state[feed].get(key)
+        status = feed_delivery_status(
+            existing,
+            feed=feed,
+            report_key_value=key,
+        )
+
+        claimable = status in (None, FEED_DELIVERY_FAILED)
+        if status == FEED_DELIVERY_CONFIRMED and force:
+            claimable = True
+
+        if not claimable:
+            outcome = status or FEED_DELIVERY_INVALID
+            return
+
+        record = copy.deepcopy(existing) if isinstance(existing, dict) else {}
+        record.update(
+            {
+                "delivery_status": FEED_DELIVERY_RESERVED,
+                "delivery_attempt_id": new_attempt_id,
+                "reserved_at": reservation_time,
+                "feed": feed,
+                "report_key": key,
+                "symbol": symbol,
+            }
+        )
+        for field in (
+            "confirmed_at",
+            "failed_at",
+            "unknown_at",
+            "delivery_error",
+            "discord_message_id",
+        ):
+            record.pop(field, None)
+        state[feed][key] = record
+        claimed = True
+        outcome = FEED_DELIVERY_RESERVED
+
+    state, _result = earnings_state_store().transaction(mutation)
+    return (
+        state,
+        outcome or FEED_DELIVERY_INVALID,
+        new_attempt_id if claimed else None,
+    )
+
+
+def transition_feed_delivery(
+    feed: str,
+    key: str,
+    attempt_id: str,
+    status: str,
+    *,
+    discord_message_id: str | None = None,
+    error: str | None = None,
+    finished_at: str | None = None,
+) -> tuple[dict[str, Any], bool]:
+    """Finish only the reservation owned by the matching delivery attempt."""
+    if status not in {
+        FEED_DELIVERY_CONFIRMED,
+        FEED_DELIVERY_FAILED,
+        FEED_DELIVERY_UNKNOWN,
+    }:
+        raise ValueError(f"Unsupported feed delivery transition: {status}")
+
+    transition_time = finished_at or datetime.now(EASTERN).isoformat()
+    transitioned = False
+
+    def mutation(state: dict[str, Any]) -> None:
+        nonlocal transitioned
+        record = state[feed].get(key)
+        if (
+            feed_delivery_status(
+                record,
+                feed=feed,
+                report_key_value=key,
+            )
+            != FEED_DELIVERY_RESERVED
+            or record.get("delivery_attempt_id") != attempt_id
+        ):
+            return
+
+        record["delivery_status"] = status
+        timestamp_field = {
+            FEED_DELIVERY_CONFIRMED: "confirmed_at",
+            FEED_DELIVERY_FAILED: "failed_at",
+            FEED_DELIVERY_UNKNOWN: "unknown_at",
+        }[status]
+        record[timestamp_field] = transition_time
+
+        if status == FEED_DELIVERY_CONFIRMED:
+            record["posted_at"] = transition_time
+            record.pop("delivery_error", None)
+            if discord_message_id:
+                record["discord_message_id"] = str(discord_message_id)
+        elif error:
+            record["delivery_error"] = error
+
+        transitioned = True
+
+    state, _result = earnings_state_store().transaction(mutation)
+    return state, transitioned
+
+
+def failed_feed_delivery_status(exc: BaseException) -> str:
+    """Classify whether Discord acceptance is known or ambiguous."""
+    if isinstance(
+        exc,
+        (
+            AmbiguousDeliveryError,
+            urllib.error.URLError,
+            TimeoutError,
+            ConnectionError,
+            asyncio.CancelledError,
+            json.JSONDecodeError,
+            EarningsStateError,
+        ),
+    ):
+        return FEED_DELIVERY_UNKNOWN
+    return FEED_DELIVERY_FAILED
+
+
+def concise_delivery_error(exc: BaseException) -> str:
+    if isinstance(exc, asyncio.CancelledError):
+        return "delivery_cancelled"
+    if failed_feed_delivery_status(exc) == FEED_DELIVERY_UNKNOWN:
+        return "delivery_outcome_ambiguous"
+    return "delivery_rejected"
 
 
 def persist_quote_cache_changes(
@@ -3678,8 +3977,6 @@ def main() -> None:
         return
 
     if arguments.review_bot:
-        import asyncio
-
         asyncio.run(
             run_review_button_bot()
         )
@@ -3843,28 +4140,55 @@ def main() -> None:
         ):
             key = report_key(candidate["report"])
 
-            state = load_state()
-
+            state, reservation_status, attempt_id = reserve_feed_delivery(
+                "private",
+                key,
+                candidate["symbol"],
+                force=arguments.force,
+            )
             if (
-                key in state["private"]
-                and not arguments.force
+                reservation_status != FEED_DELIVERY_RESERVED
+                or attempt_id is None
             ):
                 continue
 
-            send_private_review_with_chart(
-                candidate,
-                rank,
-                state,
-            )
+            try:
+                message_id = send_private_review_with_chart(
+                    candidate,
+                    rank,
+                    state,
+                )
+            except asyncio.CancelledError as exc:
+                transition_feed_delivery(
+                    "private",
+                    key,
+                    attempt_id,
+                    FEED_DELIVERY_UNKNOWN,
+                    error=concise_delivery_error(exc),
+                )
+                raise
+            except Exception as exc:
+                transition_feed_delivery(
+                    "private",
+                    key,
+                    attempt_id,
+                    failed_feed_delivery_status(exc),
+                    error=concise_delivery_error(exc),
+                )
+                raise
 
-            state = set_state_record(
+            state, _confirmed = transition_feed_delivery(
                 "private",
                 key,
-                {
-                    "posted_at": datetime.now(EASTERN).isoformat(),
-                    "symbol": candidate["symbol"],
-                },
+                attempt_id,
+                FEED_DELIVERY_CONFIRMED,
+                discord_message_id=message_id,
             )
+            if not _confirmed:
+                raise EarningsStateError(
+                    "Private delivery confirmation no longer matches "
+                    "its reservation."
+                )
             private_posted += 1
             time.sleep(DISCORD_POST_DELAY_SECONDS)
 
@@ -3877,28 +4201,55 @@ def main() -> None:
     for candidate in public_to_post:
         key = report_key(candidate["report"])
 
-        state = load_state()
-
+        state, reservation_status, attempt_id = reserve_feed_delivery(
+            "public",
+            key,
+            candidate["symbol"],
+            force=arguments.force,
+        )
         if (
-            key in state["public"]
-            and not arguments.force
+            reservation_status != FEED_DELIVERY_RESERVED
+            or attempt_id is None
         ):
             continue
 
-        send_discord_message(
-            public_webhook,
-            build_public_message(candidate),
-            PUBLIC_WEBHOOK_USERNAME,
-        )
+        try:
+            message_id = send_discord_message(
+                public_webhook,
+                build_public_message(candidate),
+                PUBLIC_WEBHOOK_USERNAME,
+            )
+        except asyncio.CancelledError as exc:
+            transition_feed_delivery(
+                "public",
+                key,
+                attempt_id,
+                FEED_DELIVERY_UNKNOWN,
+                error=concise_delivery_error(exc),
+            )
+            raise
+        except Exception as exc:
+            transition_feed_delivery(
+                "public",
+                key,
+                attempt_id,
+                failed_feed_delivery_status(exc),
+                error=concise_delivery_error(exc),
+            )
+            raise
 
-        state = set_state_record(
+        state, _confirmed = transition_feed_delivery(
             "public",
             key,
-            {
-                "posted_at": datetime.now(EASTERN).isoformat(),
-                "symbol": candidate["symbol"],
-            },
+            attempt_id,
+            FEED_DELIVERY_CONFIRMED,
+            discord_message_id=message_id,
         )
+        if not _confirmed:
+            raise EarningsStateError(
+                "Public delivery confirmation no longer matches "
+                "its reservation."
+            )
         public_posted += 1
         time.sleep(DISCORD_POST_DELAY_SECONDS)
 
