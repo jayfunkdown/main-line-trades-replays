@@ -77,7 +77,7 @@ class ManualSignalPureBehaviorTests(unittest.TestCase):
             "🕒 **Timeframe:** 15m\n"
             "🎯 **Setup:** Opening drive\n\n"
             "## 🧠 Trade Thesis\n\n"
-            "Hold above VWAP.\n\n---\n\n"
+            f"Hold above VWAP.\n\n{earnings_reactions.DIVIDER}\n\n"
             "## 📊 Trade Chart\n\n"
             "*Chart and thesis provided by Main Line Trades.*\n\n"
             "⚠️ **Manage risk. This is not financial advice.**",
@@ -90,6 +90,8 @@ class ManualSignalPureBehaviorTests(unittest.TestCase):
         self.assertNotIn("Timeframe", content)
         self.assertNotIn("Setup:", content)
         self.assertIn("## BTC/USD", content)
+        self.assertIn(earnings_reactions.DIVIDER, content)
+        self.assertNotIn("\n---\n", content)
 
     def test_non_stock_instruments_and_message_boundary(self):
         self.assertFalse(
@@ -145,6 +147,14 @@ class ManualSignalPureBehaviorTests(unittest.TestCase):
                     SimpleNamespace(filename=filename, content_type=content_type)
                 )
             )
+
+    def test_manual_signal_log_labels_are_safe_and_bounded(self):
+        value = earnings_reactions.safe_manual_signal_log_value(
+            "@everyone\n" + ("x" * 100)
+        )
+        self.assertNotIn("\n", value)
+        self.assertNotIn("@everyone", value)
+        self.assertLessEqual(len(value), 80)
 
 
 class ManualSignalStateTests(unittest.TestCase):
@@ -243,6 +253,13 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
             send=AsyncMock(),
             fetch_message=AsyncMock(),
         )
+        self.bot_log = SimpleNamespace(send=AsyncMock())
+        self.bot_log_env_patcher = patch.dict(
+            os.environ,
+            {"BOT_LOG_CHANNEL_ID": "900"},
+        )
+        self.bot_log_env_patcher.start()
+        self.addCleanup(self.bot_log_env_patcher.stop)
         self.urlopen_patcher = patch.object(
             earnings_reactions.urllib.request,
             "urlopen",
@@ -281,6 +298,7 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
 
     async def start_bot(self):
         client = ComposerClient(self.signals, self.review, self.drafts)
+        client.channels[900] = self.bot_log
         tree_holder = {}
 
         class CapturingTree(FakeCommandTree):
@@ -296,7 +314,12 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
             }[name]
 
         with patch.dict(
-            os.environ, {"SIGNAL_DRAFTS_CHANNEL_ID": "300"}, clear=True
+            os.environ,
+            {
+                "SIGNAL_DRAFTS_CHANNEL_ID": "300",
+                "BOT_LOG_CHANNEL_ID": "900",
+            },
+            clear=True,
         ), patch.object(
             earnings_reactions, "required_env", side_effect=required
         ), patch.object(
@@ -404,7 +427,7 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record["draft_message_id"], "400")
         self.assertEqual(record["delivery_status"], "ready")
 
-    async def test_edit_retains_or_replaces_chart_and_cancel_disables(self):
+    async def test_edit_retains_or_replaces_chart_and_cancel_deletes(self):
         client, _tree, view = await self.start_bot()
         original = self.attachment()
         message = SimpleNamespace(
@@ -414,6 +437,7 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
             type=discord.MessageType.default,
             attachments=[original],
             edit=AsyncMock(),
+            delete=AsyncMock(),
         )
         self.draft_record()
         unauthorized_edit = self.interaction(
@@ -481,6 +505,13 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
         ):
             await self.button(view, "manual_signal_cancel").callback(unauthorized_cancel)
         self.assertFalse(self.state["manual_signal_drafts"]["draft"]["canceled"])
+
+        async def delete_after_persistence():
+            self.assertTrue(
+                self.state["manual_signal_drafts"]["draft"]["canceled"]
+            )
+
+        message.delete.side_effect = delete_after_persistence
         interaction = self.interaction(client, message=message)
         with patch.object(
             earnings_reactions, "load_state", side_effect=lambda: copy.deepcopy(self.state)
@@ -489,7 +520,16 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
         ):
             await self.button(view, "manual_signal_cancel").callback(interaction)
         self.assertTrue(self.state["manual_signal_drafts"]["draft"]["canceled"])
-        self.assertTrue(message.edit.await_args.kwargs["view"].children[0].disabled)
+        message.delete.assert_awaited_once()
+        message.edit.assert_not_awaited()
+        log_message = self.bot_log.send.await_args.args[0]
+        self.assertIn("ES", log_message)
+        self.assertIn("canceled", log_message)
+        self.assertNotIn("Edited thesis", log_message)
+        self.assertIsInstance(
+            self.bot_log.send.await_args.kwargs["allowed_mentions"],
+            discord.AllowedMentions,
+        )
 
     async def test_publish_success_and_concurrent_double_click(self):
         client, _tree, view = await self.start_bot()
@@ -523,6 +563,96 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
         record = self.state["manual_signal_drafts"]["draft"]
         self.assertEqual(record["delivery_status"], "sent")
         self.assertEqual(record["signals_message_id"], "600")
+        log_message = self.bot_log.send.await_args.args[0]
+        self.assertIn("ES", log_message)
+        self.assertIn("published successfully", log_message)
+        self.assertNotIn("Hold above VWAP", log_message)
+        self.assertNotIn("chart.png", log_message)
+
+    async def test_cancel_treats_already_deleted_message_as_success(self):
+        client, _tree, view = await self.start_bot()
+        not_found = discord.NotFound(
+            SimpleNamespace(status=404, reason="Not Found", text=""),
+            "Unknown Message",
+        )
+        message = SimpleNamespace(
+            id=400,
+            author=client.user,
+            channel=SimpleNamespace(id=300),
+            type=discord.MessageType.default,
+            attachments=[self.attachment()],
+            edit=AsyncMock(),
+            delete=AsyncMock(side_effect=not_found),
+        )
+        self.draft_record()
+        interaction = self.interaction(client, message=message)
+        with patch.object(
+            earnings_reactions, "load_state", side_effect=lambda: copy.deepcopy(self.state)
+        ), patch.object(
+            earnings_reactions, "update_state", side_effect=self.transactional_update
+        ):
+            await self.button(view, "manual_signal_cancel").callback(interaction)
+
+        record = self.state["manual_signal_drafts"]["draft"]
+        self.assertTrue(record["canceled"])
+        self.assertEqual(record["delivery_status"], "ready")
+        message.edit.assert_not_awaited()
+        self.assertIn("canceled", self.bot_log.send.await_args.args[0])
+
+    async def test_bot_log_failure_does_not_change_cancellation_result(self):
+        client, _tree, view = await self.start_bot()
+        message = SimpleNamespace(
+            id=400,
+            author=client.user,
+            channel=SimpleNamespace(id=300),
+            type=discord.MessageType.default,
+            attachments=[self.attachment()],
+            edit=AsyncMock(),
+            delete=AsyncMock(),
+        )
+        self.draft_record()
+        self.bot_log.send.side_effect = RuntimeError("synthetic log failure")
+        interaction = self.interaction(client, message=message)
+        with patch.object(
+            earnings_reactions, "load_state", side_effect=lambda: copy.deepcopy(self.state)
+        ), patch.object(
+            earnings_reactions, "update_state", side_effect=self.transactional_update
+        ), redirect_stdout(StringIO()):
+            await self.button(view, "manual_signal_cancel").callback(interaction)
+
+        self.assertTrue(self.state["manual_signal_drafts"]["draft"]["canceled"])
+        message.delete.assert_awaited_once()
+        self.assertIn("canceled", interaction.response.send_message.await_args.args[0])
+
+    async def test_cancel_delete_failure_keeps_canceled_and_disables_controls(self):
+        client, _tree, view = await self.start_bot()
+        message = SimpleNamespace(
+            id=400,
+            author=client.user,
+            channel=SimpleNamespace(id=300),
+            type=discord.MessageType.default,
+            attachments=[self.attachment()],
+            edit=AsyncMock(),
+            delete=AsyncMock(side_effect=RuntimeError("synthetic delete failure")),
+        )
+        self.draft_record()
+        interaction = self.interaction(client, message=message)
+        with patch.object(
+            earnings_reactions, "load_state", side_effect=lambda: copy.deepcopy(self.state)
+        ), patch.object(
+            earnings_reactions, "update_state", side_effect=self.transactional_update
+        ):
+            await self.button(view, "manual_signal_cancel").callback(interaction)
+
+        record = self.state["manual_signal_drafts"]["draft"]
+        self.assertTrue(record["canceled"])
+        self.assertEqual(record["delivery_status"], "ready")
+        fallback_view = message.edit.await_args.kwargs["view"]
+        self.assertTrue(fallback_view.children[0].disabled)
+        warning = interaction.response.send_message.await_args.args[0]
+        self.assertIn("could not be removed", warning)
+        self.assertNotIn("synthetic", warning)
+        self.assertIn("deletion failed", self.bot_log.send.await_args.args[0])
 
     async def test_edit_and_publish_serialize_with_edit_winning(self):
         client, _tree, view = await self.start_bot()
@@ -653,11 +783,9 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
         cancel_started = asyncio.Event()
         release_cancel = asyncio.Event()
 
-        async def edit_message(**kwargs):
-            if "content" not in kwargs:
-                cancel_started.set()
-                await release_cancel.wait()
-            return message
+        async def delete_message():
+            cancel_started.set()
+            await release_cancel.wait()
 
         message = SimpleNamespace(
             id=400,
@@ -665,7 +793,8 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
             channel=SimpleNamespace(id=300),
             type=discord.MessageType.default,
             attachments=[self.attachment()],
-            edit=AsyncMock(side_effect=edit_message),
+            edit=AsyncMock(),
+            delete=AsyncMock(side_effect=delete_message),
         )
         self.draft_record()
         open_interaction = self.interaction(client, message=message)

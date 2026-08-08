@@ -1831,7 +1831,7 @@ def build_manual_signal_message(
             "",
             trade_thesis.strip(),
             "",
-            "---",
+            DIVIDER,
             "",
             "## 📊 Trade Chart",
             "",
@@ -1841,6 +1841,15 @@ def build_manual_signal_message(
         ]
     )
     return "\n".join(lines)
+
+
+def safe_manual_signal_log_value(value: Any, max_length: int = 80) -> str:
+    """Compact user-controlled log labels without exposing message content."""
+    text = " ".join(str(value or "Unknown").split())
+    text = text.replace("@", "@\u200b")
+    if not text:
+        text = "Unknown"
+    return text[:max_length]
 
 
 def is_valid_manual_signal_fields(
@@ -2806,6 +2815,30 @@ async def run_review_button_bot() -> None:
                 flush=True,
             )
 
+    async def write_manual_signal_log(
+        instrument: Any,
+        user: Any,
+        outcome: str,
+    ) -> None:
+        """Write a concise best-effort lifecycle event without draft content."""
+        instrument_label = discord.utils.escape_markdown(
+            safe_manual_signal_log_value(instrument)
+        )
+        staff_label = discord.utils.escape_markdown(
+            safe_manual_signal_log_value(user)
+        )
+        try:
+            await write_bot_log(
+                f"Manual Signal **{instrument_label}** {outcome} "
+                f"by **{staff_label}**."
+            )
+        except Exception as exc:
+            print(
+                "Could not write Manual Signal lifecycle log:",
+                repr(exc),
+                flush=True,
+            )
+
     def interaction_response_is_done(
         interaction: Any,
     ) -> bool:
@@ -3178,6 +3211,11 @@ async def run_review_button_bot() -> None:
             try:
                 set_state_record("manual_signal_drafts", draft_id, record)
             except (EarningsStateError, OSError):
+                await write_manual_signal_log(
+                    instrument,
+                    interaction.user,
+                    "state persistence failed while creating a draft",
+                )
                 try:
                     await draft_message.edit(view=ManualSignalClosedView("Unavailable"))
                 except Exception:
@@ -3285,6 +3323,12 @@ async def run_review_button_bot() -> None:
             except (EarningsStateError, OSError):
                 outcome = "persistence_failed"
             if outcome != "updated":
+                if outcome == "persistence_failed":
+                    await write_manual_signal_log(
+                        instrument,
+                        interaction.user,
+                        "state persistence failed while updating a draft",
+                    )
                 await send_ephemeral_rejection(
                     interaction,
                     "The draft changed, but its state needs staff review.",
@@ -3336,6 +3380,11 @@ async def run_review_button_bot() -> None:
                     )
                 except EarningsStateError:
                     outcome = "invalid"
+                    await write_manual_signal_log(
+                        record["instrument"],
+                        interaction.user,
+                        "state persistence failed before publication",
+                    )
                 if outcome != "claimed":
                     messages = {
                         MANUAL_SIGNAL_SENDING: "This signal is already being published.",
@@ -3361,9 +3410,20 @@ async def run_review_button_bot() -> None:
                     except (EarningsStateError, OSError):
                         transition = "persistence_failed"
                     if transition != "transitioned":
+                        await write_manual_signal_log(
+                            record["instrument"],
+                            interaction.user,
+                            "state persistence failed; staff reconciliation is required",
+                        )
                         user_message = (
                             "The delivery state needs staff reconciliation. "
                             "Do not retry this signal yet."
+                        )
+                    elif status == MANUAL_SIGNAL_UNKNOWN:
+                        await write_manual_signal_log(
+                            record["instrument"],
+                            interaction.user,
+                            "has an ambiguous delivery requiring staff reconciliation",
                         )
                     await send_ephemeral_rejection(interaction, user_message)
 
@@ -3400,6 +3460,7 @@ async def run_review_button_bot() -> None:
                         filename=Path(record["chart"]["filename"]).name
                     )
                 except asyncio.CancelledError:
+                    state_persistence_failed = False
                     try:
                         transition_manual_signal_delivery(
                             draft_id,
@@ -3409,7 +3470,13 @@ async def run_review_button_bot() -> None:
                             error="pre_delivery_cancelled",
                         )
                     except (EarningsStateError, OSError):
-                        pass
+                        state_persistence_failed = True
+                    if state_persistence_failed:
+                        await write_manual_signal_log(
+                            record["instrument"],
+                            interaction.user,
+                            "state persistence failed before publication",
+                        )
                     raise
                 except Exception:
                     await finish(
@@ -3425,6 +3492,7 @@ async def run_review_button_bot() -> None:
                         allowed_mentions=discord.AllowedMentions.none(),
                     )
                 except asyncio.CancelledError:
+                    state_persistence_failed = False
                     try:
                         transition_manual_signal_delivery(
                             draft_id,
@@ -3434,7 +3502,16 @@ async def run_review_button_bot() -> None:
                             error="discord_delivery_ambiguous",
                         )
                     except (EarningsStateError, OSError):
-                        pass
+                        state_persistence_failed = True
+                    await write_manual_signal_log(
+                        record["instrument"],
+                        interaction.user,
+                        (
+                            "state persistence failed during an ambiguous delivery"
+                            if state_persistence_failed
+                            else "has an ambiguous delivery requiring staff reconciliation"
+                        ),
+                    )
                     raise
                 except (discord.Forbidden, discord.HTTPException):
                     await finish(
@@ -3471,11 +3548,25 @@ async def run_review_button_bot() -> None:
                 except (EarningsStateError, OSError):
                     confirmation = "persistence_failed"
                 if confirmation != "transitioned":
+                    await write_manual_signal_log(
+                        record["instrument"],
+                        interaction.user,
+                        (
+                            "state persistence failed after Signals accepted publication"
+                            if confirmation == "persistence_failed"
+                            else "was accepted but is unconfirmed; staff reconciliation is required"
+                        ),
+                    )
                     await send_ephemeral_rejection(
                         interaction,
                         "Signals accepted the post, but confirmation failed. Do not retry.",
                     )
                     return
+                await write_manual_signal_log(
+                    record["instrument"],
+                    interaction.user,
+                    "was published successfully to Signals",
+                )
                 try:
                     await draft_message.edit(view=ManualSignalClosedView("Published"))
                 except Exception as exc:
@@ -3550,6 +3641,11 @@ async def run_review_button_bot() -> None:
                     )
                 except EarningsStateError:
                     outcome = "invalid"
+                    await write_manual_signal_log(
+                        record["instrument"],
+                        interaction.user,
+                        "state persistence failed during cancellation",
+                    )
                 if outcome != "canceled":
                     await send_ephemeral_rejection(
                         interaction,
@@ -3557,13 +3653,35 @@ async def run_review_button_bot() -> None:
                     )
                     return
                 try:
-                    await draft_message.edit(view=ManualSignalClosedView("Canceled"))
+                    await draft_message.delete()
+                except discord.NotFound:
+                    pass
                 except Exception:
+                    await write_manual_signal_log(
+                        record["instrument"],
+                        interaction.user,
+                        "draft deletion failed after cancellation",
+                    )
+                    try:
+                        await draft_message.edit(
+                            view=ManualSignalClosedView("Canceled")
+                        )
+                    except Exception as exc:
+                        print(
+                            "Could not disable canceled Manual Signal controls:",
+                            repr(exc),
+                            flush=True,
+                        )
                     await send_ephemeral_rejection(
                         interaction,
-                        "The draft was canceled, but its controls could not be updated.",
+                        "The draft was canceled, but its message could not be removed.",
                     )
                     return
+                await write_manual_signal_log(
+                    record["instrument"],
+                    interaction.user,
+                    "was canceled and its draft message was deleted",
+                )
                 await send_ephemeral_rejection(interaction, "Signal draft canceled.")
 
     class TradeThesisModal(discord.ui.Modal):
