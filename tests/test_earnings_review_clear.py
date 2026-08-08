@@ -1,8 +1,10 @@
 import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import patch
 
-from scripts import earnings_reactions
+with patch("dotenv.load_dotenv"):
+    from scripts import earnings_reactions
 
 
 class FakeHttpError(Exception):

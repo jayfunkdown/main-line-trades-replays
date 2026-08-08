@@ -7,7 +7,8 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts import trump_filter
+with patch("dotenv.load_dotenv"):
+    from scripts import trump_filter
 
 
 class OversizedMessageTests(unittest.TestCase):
