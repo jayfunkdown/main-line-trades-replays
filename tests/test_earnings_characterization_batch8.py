@@ -19,7 +19,7 @@ import discord
 from tests import test_earnings_characterization_batch2 as batch2
 
 with patch("dotenv.load_dotenv"):
-    from scripts import earnings_reactions
+    from scripts import earnings_reactions, earnings_state
 
 
 FIXED_NOW = datetime(
@@ -388,6 +388,10 @@ class ConfigurationAndMessageBoundaryTests(NoNetworkTestCase):
 
             with self.subTest(mode="review-bot"):
                 with patch.dict(os.environ, {}, clear=True), patch.object(
+                    earnings_reactions,
+                    "STATE_FILE",
+                    state_path,
+                ), patch.object(
                     sys,
                     "argv",
                     ["earnings_reactions.py", "--review-bot"],
@@ -469,6 +473,10 @@ class ReviewModalBoundaryTests(unittest.IsolatedAsyncioTestCase):
             "resolve_webhook_channel_id",
             return_value="200",
         ), patch.object(
+            earnings_reactions,
+            "load_state",
+            return_value=empty_state(),
+        ), patch.object(
             discord,
             "Client",
             return_value=client,
@@ -521,8 +529,8 @@ class ReviewModalBoundaryTests(unittest.IsolatedAsyncioTestCase):
             return_value=empty_state(),
         ), patch.object(
             earnings_reactions,
-            "save_state",
-        ) as save_state:
+            "update_state",
+        ) as update_state:
             await modal.on_submit(interaction)
 
         interaction.response.defer.assert_awaited_once_with(
@@ -535,7 +543,33 @@ class ReviewModalBoundaryTests(unittest.IsolatedAsyncioTestCase):
         )
         attachment.to_file.assert_not_awaited()
         signals_channel.send.assert_not_awaited()
-        save_state.assert_not_called()
+        update_state.assert_not_called()
+
+    async def test_modal_invalid_state_fails_before_discord_defer(self):
+        attachment = SimpleNamespace(
+            filename="chart.png",
+            content_type="image/png",
+            to_file=AsyncMock(),
+        )
+        modal, signals_channel = await self.build_modal(attachment)
+        interaction = self.interaction()
+
+        with patch.object(
+            earnings_reactions,
+            "load_state",
+            side_effect=earnings_state.EarningsStateValidationError(
+                "synthetic corrupt state"
+            ),
+        ):
+            with self.assertRaises(
+                earnings_state.EarningsStateValidationError
+            ):
+                await modal.on_submit(interaction)
+
+        interaction.response.defer.assert_not_awaited()
+        interaction.followup.send.assert_not_awaited()
+        attachment.to_file.assert_not_awaited()
+        signals_channel.send.assert_not_awaited()
 
     async def test_modal_invalid_candidate_stops_before_attachment_or_signal(self):
         attachment = SimpleNamespace(
@@ -558,8 +592,8 @@ class ReviewModalBoundaryTests(unittest.IsolatedAsyncioTestCase):
             return_value=state,
         ), patch.object(
             earnings_reactions,
-            "save_state",
-        ) as save_state:
+            "update_state",
+        ) as update_state:
             await modal.on_submit(interaction)
 
         self.assertIn(
@@ -568,7 +602,7 @@ class ReviewModalBoundaryTests(unittest.IsolatedAsyncioTestCase):
         )
         attachment.to_file.assert_not_awaited()
         signals_channel.send.assert_not_awaited()
-        save_state.assert_not_called()
+        update_state.assert_not_called()
 
     async def test_modal_rejects_unsupported_attachment_before_conversion(self):
         attachment = SimpleNamespace(
@@ -591,8 +625,8 @@ class ReviewModalBoundaryTests(unittest.IsolatedAsyncioTestCase):
             return_value=state,
         ), patch.object(
             earnings_reactions,
-            "save_state",
-        ) as save_state:
+            "update_state",
+        ) as update_state:
             await modal.on_submit(interaction)
 
         self.assertIn(
@@ -601,7 +635,7 @@ class ReviewModalBoundaryTests(unittest.IsolatedAsyncioTestCase):
         )
         attachment.to_file.assert_not_awaited()
         signals_channel.send.assert_not_awaited()
-        save_state.assert_not_called()
+        update_state.assert_not_called()
 
 
 if __name__ == "__main__":

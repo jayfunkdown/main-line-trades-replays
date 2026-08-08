@@ -340,8 +340,8 @@ class PrivateDeliveryFailureTests(NoNetworkTestCase):
             side_effect=RuntimeError("synthetic chart failure"),
         ), patch.object(
             earnings_reactions,
-            "save_state",
-        ) as save_state:
+            "set_state_record",
+        ) as set_record:
             with self.assertRaisesRegex(RuntimeError, "synthetic chart failure"):
                 earnings_reactions.send_private_review_with_chart(
                     candidate(),
@@ -350,15 +350,15 @@ class PrivateDeliveryFailureTests(NoNetworkTestCase):
                 )
 
         self.assertEqual(state, empty_state())
-        save_state.assert_not_called()
+        set_record.assert_not_called()
 
     def test_missing_chart_file_fails_multipart_before_upload_or_state_change(self):
         state = empty_state()
 
         with self.private_post_context(state, chart_exists=False), patch.object(
             earnings_reactions,
-            "save_state",
-        ) as save_state:
+            "set_state_record",
+        ) as set_record:
             with self.assertRaises(FileNotFoundError):
                 earnings_reactions.send_private_review_with_chart(
                     candidate(),
@@ -367,7 +367,7 @@ class PrivateDeliveryFailureTests(NoNetworkTestCase):
                 )
 
         self.assertEqual(state, empty_state())
-        save_state.assert_not_called()
+        set_record.assert_not_called()
 
     def test_private_upload_429_is_not_retried_and_state_stays_empty(self):
         state = empty_state()
@@ -381,8 +381,8 @@ class PrivateDeliveryFailureTests(NoNetworkTestCase):
             "sleep",
         ) as sleep, patch.object(
             earnings_reactions,
-            "save_state",
-        ) as save_state:
+            "set_state_record",
+        ) as set_record:
             with self.assertRaisesRegex(
                 RuntimeError,
                 "private earnings review: HTTP 429: rate limited",
@@ -396,7 +396,7 @@ class PrivateDeliveryFailureTests(NoNetworkTestCase):
         urlopen.assert_called_once()
         sleep.assert_not_called()
         self.assertEqual(state, empty_state())
-        save_state.assert_not_called()
+        set_record.assert_not_called()
 
     def test_private_upload_urlerror_propagates_and_state_stays_empty(self):
         state = empty_state()
@@ -407,8 +407,8 @@ class PrivateDeliveryFailureTests(NoNetworkTestCase):
             side_effect=urllib.error.URLError("synthetic upload failure"),
         ) as urlopen, patch.object(
             earnings_reactions,
-            "save_state",
-        ) as save_state:
+            "set_state_record",
+        ) as set_record:
             with self.assertRaises(urllib.error.URLError):
                 earnings_reactions.send_private_review_with_chart(
                     candidate(),
@@ -418,7 +418,7 @@ class PrivateDeliveryFailureTests(NoNetworkTestCase):
 
         urlopen.assert_called_once()
         self.assertEqual(state, empty_state())
-        save_state.assert_not_called()
+        set_record.assert_not_called()
 
     def test_private_success_with_malformed_json_is_not_persisted(self):
         state = empty_state()
@@ -429,8 +429,8 @@ class PrivateDeliveryFailureTests(NoNetworkTestCase):
             return_value=FakeResponse(b"{not-json"),
         ) as urlopen, patch.object(
             earnings_reactions,
-            "save_state",
-        ) as save_state:
+            "set_state_record",
+        ) as set_record:
             with self.assertRaises(json.JSONDecodeError):
                 earnings_reactions.send_private_review_with_chart(
                     candidate(),
@@ -440,10 +440,14 @@ class PrivateDeliveryFailureTests(NoNetworkTestCase):
 
         urlopen.assert_called_once()
         self.assertEqual(state, empty_state())
-        save_state.assert_not_called()
+        set_record.assert_not_called()
 
     def test_private_success_without_message_id_is_saved_with_empty_id(self):
         state = empty_state()
+
+        def store_record(section, key, value):
+            state[section][key] = value
+            return json.loads(json.dumps(state))
 
         with self.private_post_context(state), patch.object(
             earnings_reactions.urllib.request,
@@ -451,8 +455,9 @@ class PrivateDeliveryFailureTests(NoNetworkTestCase):
             return_value=FakeResponse(b"{}"),
         ) as urlopen, patch.object(
             earnings_reactions,
-            "save_state",
-        ) as save_state:
+            "set_state_record",
+            side_effect=store_record,
+        ) as set_record:
             message_id = earnings_reactions.send_private_review_with_chart(
                 candidate(),
                 1,
@@ -471,7 +476,7 @@ class PrivateDeliveryFailureTests(NoNetworkTestCase):
         )
         self.assertFalse(state["signal_queue"][token]["sent_to_signals"])
         urlopen.assert_called_once()
-        save_state.assert_called_once_with(state)
+        set_record.assert_called_once()
 
 
 class CalendarDirectoryFailureTests(NoNetworkTestCase):
@@ -503,7 +508,7 @@ class CalendarDirectoryFailureTests(NoNetworkTestCase):
 class PrivateThenPublicFailureTests(NoNetworkTestCase):
     def test_private_success_is_fully_saved_before_public_failure(self):
         item = candidate()
-        original_save_state = earnings_reactions.save_state
+        original_update_state = earnings_reactions.update_state
 
         with self.temporary_state() as state_path, tempfile.TemporaryDirectory() as temp_dir:
             chart_path = Path(temp_dir) / "chart.png"
@@ -569,9 +574,9 @@ class PrivateThenPublicFailureTests(NoNetworkTestCase):
                 side_effect=responses,
             ) as urlopen, patch.object(
                 earnings_reactions,
-                "save_state",
-                wraps=original_save_state,
-            ) as save_state, patch.object(
+                "update_state",
+                wraps=original_update_state,
+            ) as update_state, patch.object(
                 earnings_reactions.time,
                 "sleep",
             ) as sleep, redirect_stdout(StringIO()):
@@ -586,7 +591,7 @@ class PrivateThenPublicFailureTests(NoNetworkTestCase):
         report_key = earnings_reactions.report_key(item["report"])
         token = earnings_reactions.candidate_button_token(item)
         self.assertEqual(urlopen.call_count, 3)
-        self.assertEqual(save_state.call_count, 3)
+        self.assertEqual(update_state.call_count, 3)
         sleep.assert_called_once_with(
             earnings_reactions.DISCORD_POST_DELAY_SECONDS
         )

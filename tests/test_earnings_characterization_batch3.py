@@ -16,6 +16,7 @@ from tests import test_earnings_characterization_batch2 as batch2
 
 with patch("dotenv.load_dotenv"):
     from scripts import earnings_reactions
+from scripts.earnings_state import EarningsStateValidationError
 
 
 class NoNetworkTestCase(unittest.TestCase):
@@ -97,9 +98,9 @@ class PrivateReviewPersistenceTests(NoNetworkTestCase):
                 ) as discord_post,
                 patch.object(
                     earnings_reactions,
-                    "save_state",
+                    "set_state_record",
                     side_effect=OSError("simulated state save failure"),
-                ) as save_state,
+                ) as set_record,
             ):
                 with self.assertRaisesRegex(OSError, "state save failure"):
                     earnings_reactions.send_private_review_with_chart(
@@ -109,10 +110,8 @@ class PrivateReviewPersistenceTests(NoNetworkTestCase):
                     )
 
         discord_post.assert_called_once()
-        save_state.assert_called_once_with(state)
-        queued_item = next(iter(state["signal_queue"].values()))
-        self.assertEqual(queued_item["review_message_id"], "987654321")
-        self.assertFalse(queued_item["sent_to_signals"])
+        set_record.assert_called_once()
+        self.assertEqual(state["signal_queue"], {})
 
 
 class CorruptNestedExecutionTests(NoNetworkTestCase):
@@ -154,7 +153,7 @@ class CorruptNestedExecutionTests(NoNetworkTestCase):
             ),
         )
 
-    def test_corrupt_private_section_posts_then_fails_recording_key(self):
+    def test_corrupt_private_section_fails_before_posting(self):
         state = self.empty_state()
         state["private"] = []
 
@@ -220,12 +219,12 @@ class CorruptNestedExecutionTests(NoNetworkTestCase):
                 stack.enter_context(patch.object(earnings_reactions.time, "sleep"))
                 stack.enter_context(redirect_stdout(StringIO()))
 
-                with self.assertRaises(TypeError):
+                with self.assertRaises(EarningsStateValidationError):
                     earnings_reactions.main()
 
-        send_private.assert_called_once()
+        send_private.assert_not_called()
 
-    def test_corrupt_quotes_section_fails_preview_before_quote_request(self):
+    def test_corrupt_quotes_section_is_reset_and_preview_continues(self):
         state = self.empty_state()
         state["quotes"] = []
 
@@ -246,14 +245,23 @@ class CorruptNestedExecutionTests(NoNetworkTestCase):
                 for manager in patches:
                     stack.enter_context(manager)
                 quote_request = stack.enter_context(
-                    patch.object(earnings_reactions, "get_quote_with_retry")
+                    patch.object(
+                        earnings_reactions,
+                        "get_quote_with_retry",
+                        return_value={"c": 10.0, "dp": 5.0},
+                    )
                 )
                 stack.enter_context(redirect_stdout(StringIO()))
 
-                with self.assertRaises(AttributeError):
-                    earnings_reactions.main()
+                earnings_reactions.main()
 
-        quote_request.assert_not_called()
+            persisted = json.loads(state_path.read_text(encoding="utf-8"))
+
+        quote_request.assert_called_once_with("ACME")
+        self.assertIsInstance(persisted["quotes"], dict)
+        self.assertEqual(persisted["public"], {})
+        self.assertEqual(persisted["private"], {})
+        self.assertEqual(persisted["signal_queue"], {})
 
 
 class TwoPartyAttachmentBarrier:
@@ -304,6 +312,19 @@ class SendToSignalsRaceAndProvenanceTests(unittest.IsolatedAsyncioTestCase):
             },
         }
 
+    @staticmethod
+    def transactional_update(persisted_state, event=None):
+        def update(mutation):
+            latest = json.loads(json.dumps(persisted_state))
+            mutation(latest)
+            persisted_state.clear()
+            persisted_state.update(json.loads(json.dumps(latest)))
+            if event is not None:
+                event()
+            return json.loads(json.dumps(latest))
+
+        return update
+
     async def start_fake_bot(self, signals_channel, review_channel):
         client = batch2.FakeDiscordClient(signals_channel, review_channel)
 
@@ -325,6 +346,11 @@ class SendToSignalsRaceAndProvenanceTests(unittest.IsolatedAsyncioTestCase):
                 earnings_reactions,
                 "resolve_webhook_channel_id",
                 return_value="200",
+            ),
+            patch.object(
+                earnings_reactions,
+                "load_state",
+                return_value=self.signal_state(sent=False),
             ),
             patch.object(discord, "Client", return_value=client),
             patch.object(
@@ -403,7 +429,11 @@ class SendToSignalsRaceAndProvenanceTests(unittest.IsolatedAsyncioTestCase):
                 "load_state",
                 side_effect=lambda: json.loads(json.dumps(persisted_state)),
             ) as load_state,
-            patch.object(earnings_reactions, "save_state") as save_state,
+            patch.object(
+                earnings_reactions,
+                "update_state",
+                side_effect=self.transactional_update(persisted_state),
+            ) as update_state,
             redirect_stdout(StringIO()),
         ):
             await asyncio.gather(
@@ -414,7 +444,7 @@ class SendToSignalsRaceAndProvenanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(load_state.call_count, 2)
         self.assertEqual(barrier.arrivals, 2)
         self.assertEqual(signals_channel.send.await_count, 2)
-        self.assertEqual(save_state.call_count, 2)
+        self.assertEqual(update_state.call_count, 2)
 
     async def test_review_update_failure_occurs_after_saved_signal_state(self):
         events = []
@@ -434,7 +464,7 @@ class SendToSignalsRaceAndProvenanceTests(unittest.IsolatedAsyncioTestCase):
         modal = await self.open_modal(client)
         state = self.signal_state(sent=False)
 
-        def save_state(saved_state):
+        def state_saved():
             events.append("state-saved")
 
         first_interaction = self.submit_interaction()
@@ -447,9 +477,9 @@ class SendToSignalsRaceAndProvenanceTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(
                 earnings_reactions,
-                "save_state",
-                side_effect=save_state,
-            ) as save_state_mock,
+                "update_state",
+                side_effect=self.transactional_update(state, state_saved),
+            ) as update_state,
             redirect_stdout(StringIO()),
         ):
             await modal.on_submit(first_interaction)
@@ -461,7 +491,7 @@ class SendToSignalsRaceAndProvenanceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(state["signal_queue"]["token"]["sent_to_signals"])
         signals_channel.send.assert_awaited_once()
-        save_state_mock.assert_called_once_with(state)
+        update_state.assert_called_once()
         first_interaction.delete_original_response.assert_awaited_once()
 
     async def test_button_opens_modal_without_channel_or_staff_check(self):
@@ -512,7 +542,11 @@ class SendToSignalsRaceAndProvenanceTests(unittest.IsolatedAsyncioTestCase):
                 "load_state",
                 return_value=state,
             ),
-            patch.object(earnings_reactions, "save_state") as save_state,
+            patch.object(
+                earnings_reactions,
+                "update_state",
+                side_effect=self.transactional_update(state),
+            ) as update_state,
             redirect_stdout(StringIO()),
         ):
             await modal.on_submit(
@@ -523,7 +557,7 @@ class SendToSignalsRaceAndProvenanceTests(unittest.IsolatedAsyncioTestCase):
             )
 
         signals_channel.send.assert_awaited_once()
-        save_state.assert_called_once_with(state)
+        update_state.assert_called_once()
         self.assertTrue(state["signal_queue"]["token"]["sent_to_signals"])
 
 

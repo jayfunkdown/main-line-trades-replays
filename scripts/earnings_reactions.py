@@ -59,6 +59,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 
 import argparse
+import copy
 import hashlib
 import tempfile
 import json
@@ -70,8 +71,13 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
+
+try:
+    from .earnings_state import EarningsStateStore
+except ImportError:
+    from earnings_state import EarningsStateStore
 
 
 FINNHUB_BASE_URL = "https://finnhub.io/api/v1"
@@ -1531,10 +1537,7 @@ def send_private_review_with_chart(
         or ""
     )
 
-    state.setdefault(
-        "signal_queue",
-        {},
-    )[token] = {
+    queue_item = {
         "candidate": (
             serializable_candidate(
                 candidate
@@ -1554,9 +1557,13 @@ def send_private_review_with_chart(
         "sent_to_signals": False,
     }
 
-    save_state(
-        state
+    latest_state = set_state_record(
+        "signal_queue",
+        token,
+        queue_item,
     )
+    state.clear()
+    state.update(latest_state)
 
     return message_id
 
@@ -1890,6 +1897,10 @@ async def run_review_button_bot() -> None:
             "Install it with: python -m pip install discord.py"
         ) from exc
 
+    # Validate duplicate-protection and interaction state before resolving
+    # Discord configuration or starting any network activity.
+    load_state()
+
     bot_token = required_env("DISCORD_BOT_TOKEN")
     signals_channel_id = int(required_env("SIGNALS_CHANNEL_ID"))
 
@@ -2085,14 +2096,14 @@ async def run_review_button_bot() -> None:
             self,
             interaction,
         ):
+            state = load_state()
+
             # Acknowledge immediately because converting an attachment and
             # posting it can take longer than Discord's interaction window.
             await interaction.response.defer(
                 ephemeral=True,
                 thinking=True,
             )
-
-            state = load_state()
 
             found = find_signal_item_by_review_message(
                 state,
@@ -2266,37 +2277,39 @@ async def run_review_button_bot() -> None:
                 )
                 return
 
-            item[
-                "trade_thesis"
-            ] = thesis
+            signal_updates = {
+                "trade_thesis": thesis,
+                "sent_to_signals": True,
+                "sent_at": datetime.now(
+                    EASTERN
+                ).isoformat(),
+                "sent_by": str(
+                    interaction.user
+                ),
+                "signal_chart_filename": attachment.filename,
+                "awaiting_chart": False,
+            }
 
-            item[
-                "sent_to_signals"
-            ] = True
+            def save_signal_result(
+                latest_state: dict[str, Any],
+            ) -> None:
+                latest_item = latest_state[
+                    "signal_queue"
+                ].get(token)
 
-            item[
-                "sent_at"
-            ] = datetime.now(
-                EASTERN
-            ).isoformat()
+                if not isinstance(latest_item, dict):
+                    raise RuntimeError(
+                        "The earnings review state changed "
+                        "before the Signals result could be saved."
+                    )
 
-            item[
-                "sent_by"
-            ] = str(
-                interaction.user
+                latest_item.update(signal_updates)
+
+            latest_state = update_state(
+                save_signal_result
             )
-
-            item[
-                "signal_chart_filename"
-            ] = attachment.filename
-
-            item[
-                "awaiting_chart"
-            ] = False
-
-            save_state(
-                state
-            )
+            state.clear()
+            state.update(latest_state)
 
             # Change the review button from green "Send to Signals"
             # to a gray disabled "Sent" button.
@@ -2594,53 +2607,51 @@ def send_discord_message(
     raise RuntimeError("Discord post failed after retries.")
 
 
+def earnings_state_store() -> EarningsStateStore:
+    return EarningsStateStore(STATE_FILE)
+
+
 def load_state() -> dict[str, Any]:
-    if not STATE_FILE.exists():
-        return {
-            "public": {},
-            "private": {},
-            "quotes": {},
-            "signal_queue": {},
-        }
+    return earnings_state_store().load()
 
-    try:
-        state = json.loads(
-            STATE_FILE.read_text(encoding="utf-8")
-        )
-    except (OSError, json.JSONDecodeError):
-        return {
-            "public": {},
-            "private": {},
-            "quotes": {},
-            "signal_queue": {},
-        }
 
-    state.setdefault("public", {})
-    state.setdefault("private", {})
-    state.setdefault("quotes", {})
-    state.setdefault("signal_queue", {})
-
+def update_state(
+    mutation: Callable[[dict[str, Any]], Any],
+) -> dict[str, Any]:
+    state, _result = earnings_state_store().transaction(
+        mutation
+    )
     return state
 
 
-def save_state(state: dict[str, Any]) -> None:
-    STATE_FILE.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+def set_state_record(
+    section: str,
+    key: str,
+    value: dict[str, Any],
+) -> dict[str, Any]:
+    stored_value = copy.deepcopy(value)
 
-    temporary_file = STATE_FILE.with_suffix(".tmp")
+    def mutation(state: dict[str, Any]) -> None:
+        state[section][key] = stored_value
 
-    temporary_file.write_text(
-        json.dumps(
-            state,
-            indent=2,
-            sort_keys=True,
-        ),
-        encoding="utf-8",
-    )
+    return update_state(mutation)
 
-    temporary_file.replace(STATE_FILE)
+
+def persist_quote_cache_changes(
+    original_quotes: dict[str, Any],
+    updated_quotes: dict[str, Any],
+) -> dict[str, Any]:
+    changed_quotes = {
+        key: copy.deepcopy(value)
+        for key, value in updated_quotes.items()
+        if original_quotes.get(key) != value
+    }
+
+    def mutation(state: dict[str, Any]) -> None:
+        prune_quote_cache(state)
+        state["quotes"].update(changed_quotes)
+
+    return update_state(mutation)
 
 
 
@@ -3063,9 +3074,12 @@ def main() -> None:
             "filtering and formatting only."
         )
 
-    reports = get_completed_reports(target_date)
-
     state = load_state()
+    original_quotes = copy.deepcopy(
+        state["quotes"]
+    )
+
+    reports = get_completed_reports(target_date)
 
     candidates, quote_calls, cache_hits = build_candidates_optimized(
         reports,
@@ -3075,7 +3089,10 @@ def main() -> None:
 
     # Save quote cache even in preview mode. This is operational cache only;
     # preview still does not change Discord posting state.
-    save_state(state)
+    state = persist_quote_cache_changes(
+        original_quotes,
+        state["quotes"],
+    )
 
     private_candidates = sorted(
         [
@@ -3179,6 +3196,8 @@ def main() -> None:
         ):
             key = report_key(candidate["report"])
 
+            state = load_state()
+
             if (
                 key in state["private"]
                 and not arguments.force
@@ -3191,12 +3210,14 @@ def main() -> None:
                 state,
             )
 
-            state["private"][key] = {
-                "posted_at": datetime.now(EASTERN).isoformat(),
-                "symbol": candidate["symbol"],
-            }
-
-            save_state(state)
+            state = set_state_record(
+                "private",
+                key,
+                {
+                    "posted_at": datetime.now(EASTERN).isoformat(),
+                    "symbol": candidate["symbol"],
+                },
+            )
             private_posted += 1
             time.sleep(DISCORD_POST_DELAY_SECONDS)
 
@@ -3208,6 +3229,8 @@ def main() -> None:
 
     for candidate in public_to_post:
         key = report_key(candidate["report"])
+
+        state = load_state()
 
         if (
             key in state["public"]
@@ -3221,12 +3244,14 @@ def main() -> None:
             PUBLIC_WEBHOOK_USERNAME,
         )
 
-        state["public"][key] = {
-            "posted_at": datetime.now(EASTERN).isoformat(),
-            "symbol": candidate["symbol"],
-        }
-
-        save_state(state)
+        state = set_state_record(
+            "public",
+            key,
+            {
+                "posted_at": datetime.now(EASTERN).isoformat(),
+                "symbol": candidate["symbol"],
+            },
+        )
         public_posted += 1
         time.sleep(DISCORD_POST_DELAY_SECONDS)
 

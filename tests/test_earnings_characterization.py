@@ -12,6 +12,7 @@ from unittest.mock import call, patch
 
 with patch("dotenv.load_dotenv"):
     from scripts import earnings_reactions
+from scripts.earnings_state import EarningsStateValidationError
 
 
 class NoNetworkTestCase(unittest.TestCase):
@@ -113,17 +114,15 @@ class EarningsStateTests(NoNetworkTestCase):
             self.assertEqual(self.load_from(state_path), self.EMPTY_STATE)
             self.assertFalse(state_path.exists())
 
-    def test_empty_and_malformed_state_files_return_empty_sections(self):
+    def test_empty_and_malformed_state_files_fail_closed(self):
         for content in ("", "{not-json"):
             with self.subTest(content=content):
                 with tempfile.TemporaryDirectory() as temp_dir:
                     state_path = Path(temp_dir) / "state.json"
                     state_path.write_text(content, encoding="utf-8")
 
-                    self.assertEqual(
-                        self.load_from(state_path),
-                        self.EMPTY_STATE,
-                    )
+                    with self.assertRaises(EarningsStateValidationError):
+                        self.load_from(state_path)
 
     def test_empty_json_object_is_normalized_without_rewriting_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -135,12 +134,12 @@ class EarningsStateTests(NoNetworkTestCase):
             self.assertEqual(state, self.EMPTY_STATE)
             self.assertEqual(state_path.read_text(encoding="utf-8"), "{}")
 
-    def test_valid_non_object_json_raises_attribute_error(self):
+    def test_valid_non_object_json_fails_closed(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / "state.json"
             state_path.write_text("[]", encoding="utf-8")
 
-            with self.assertRaises(AttributeError):
+            with self.assertRaises(EarningsStateValidationError):
                 self.load_from(state_path)
 
 
@@ -271,68 +270,74 @@ class DuplicatePostingTests(NoNetworkTestCase):
     def run_post(self, state):
         output = StringIO()
 
-        with (
-            patch.dict(
-                os.environ,
-                {"EARNINGS_REVIEW_WEBHOOK": "review-webhook"},
-                clear=True,
-            ),
-            patch.object(
-                sys,
-                "argv",
-                [
-                    "earnings_reactions.py",
-                    "--post",
-                    "--date",
-                    self.TARGET_DATE,
-                ],
-            ),
-            patch.object(
-                earnings_reactions,
-                "get_completed_reports",
-                return_value=[self.report],
-            ),
-            patch.object(
-                earnings_reactions,
-                "build_candidates_optimized",
-                return_value=([self.candidate], 0, 0),
-            ),
-            patch.object(earnings_reactions, "load_state", return_value=state),
-            patch.object(earnings_reactions, "save_state") as save_state,
-            patch.object(
-                earnings_reactions,
-                "qualifies_for_private",
-                return_value=True,
-            ),
-            patch.object(
-                earnings_reactions,
-                "qualifies_for_public",
-                return_value=True,
-            ),
-            patch.object(
-                earnings_reactions,
-                "required_env",
-                return_value="public-webhook",
-            ),
-            patch.object(
-                earnings_reactions,
-                "send_private_review_with_chart",
-            ) as send_private,
-            patch.object(
-                earnings_reactions,
-                "send_discord_message",
-            ) as send_public,
-            patch.object(
-                earnings_reactions,
-                "build_public_message",
-                return_value="public message",
-            ),
-            patch.object(earnings_reactions.time, "sleep"),
-            redirect_stdout(output),
-        ):
-            earnings_reactions.main()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "state.json"
+            state_path.write_text(json.dumps(state), encoding="utf-8")
 
-        return send_private, send_public, save_state, output.getvalue()
+            with (
+                patch.dict(
+                    os.environ,
+                    {"EARNINGS_REVIEW_WEBHOOK": "review-webhook"},
+                    clear=True,
+                ),
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "earnings_reactions.py",
+                        "--post",
+                        "--date",
+                        self.TARGET_DATE,
+                    ],
+                ),
+                patch.object(earnings_reactions, "STATE_FILE", state_path),
+                patch.object(
+                    earnings_reactions,
+                    "get_completed_reports",
+                    return_value=[self.report],
+                ),
+                patch.object(
+                    earnings_reactions,
+                    "build_candidates_optimized",
+                    return_value=([self.candidate], 0, 0),
+                ),
+                patch.object(
+                    earnings_reactions,
+                    "qualifies_for_private",
+                    return_value=True,
+                ),
+                patch.object(
+                    earnings_reactions,
+                    "qualifies_for_public",
+                    return_value=True,
+                ),
+                patch.object(
+                    earnings_reactions,
+                    "required_env",
+                    return_value="public-webhook",
+                ),
+                patch.object(
+                    earnings_reactions,
+                    "send_private_review_with_chart",
+                ) as send_private,
+                patch.object(
+                    earnings_reactions,
+                    "send_discord_message",
+                ) as send_public,
+                patch.object(
+                    earnings_reactions,
+                    "build_public_message",
+                    return_value="public message",
+                ),
+                patch.object(earnings_reactions.time, "sleep"),
+                redirect_stdout(output),
+            ):
+                earnings_reactions.main()
+                final_state = earnings_reactions.load_state()
+
+        state.clear()
+        state.update(final_state)
+        return send_private, send_public, output.getvalue()
 
     def state(self):
         return {
@@ -348,11 +353,10 @@ class DuplicatePostingTests(NoNetworkTestCase):
         state["public"][self.key] = {"symbol": "ACME"}
         original_state = copy.deepcopy(state)
 
-        send_private, send_public, save_state, output = self.run_post(state)
+        send_private, send_public, output = self.run_post(state)
 
         send_private.assert_not_called()
         send_public.assert_not_called()
-        save_state.assert_called_once_with(state)
         self.assertEqual(state, original_state)
         self.assertIn("0 private posted, 0 public posted", output)
 
@@ -360,7 +364,7 @@ class DuplicatePostingTests(NoNetworkTestCase):
         state = self.state()
         state["private"][self.key] = {"symbol": "ACME"}
 
-        send_private, send_public, save_state, output = self.run_post(state)
+        send_private, send_public, output = self.run_post(state)
 
         send_private.assert_not_called()
         send_public.assert_called_once_with(
@@ -369,7 +373,6 @@ class DuplicatePostingTests(NoNetworkTestCase):
             earnings_reactions.PUBLIC_WEBHOOK_USERNAME,
         )
         self.assertIn(self.key, state["public"])
-        self.assertEqual(save_state.call_count, 2)
         self.assertIn("0 private posted, 1 public posted", output)
 
 

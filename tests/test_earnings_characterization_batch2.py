@@ -14,6 +14,7 @@ import discord
 
 with patch("dotenv.load_dotenv"):
     from scripts import earnings_reactions
+from scripts.earnings_state import EarningsStateValidationError
 
 
 class NoNetworkTestCase(unittest.TestCase):
@@ -36,7 +37,7 @@ class StateWriteCharacterizationTests(NoNetworkTestCase):
             "signal_queue": {},
         }
 
-    def test_stale_earnings_write_overwrites_review_bot_update(self):
+    def test_transactional_record_updates_preserve_review_bot_update(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / "state.json"
             original = self.empty_state()
@@ -46,29 +47,28 @@ class StateWriteCharacterizationTests(NoNetworkTestCase):
             }
 
             with patch.object(earnings_reactions, "STATE_FILE", state_path):
-                earnings_reactions.save_state(original)
+                earnings_reactions.earnings_state_store().replace(original)
 
-                earnings_snapshot = earnings_reactions.load_state()
-                review_snapshot = earnings_reactions.load_state()
+                def mark_signal_sent(state):
+                    state["signal_queue"]["token"][
+                        "sent_to_signals"
+                    ] = True
 
-                review_snapshot["signal_queue"]["token"][
-                    "sent_to_signals"
-                ] = True
-                earnings_reactions.save_state(review_snapshot)
-
-                earnings_snapshot["public"]["report-key"] = {
-                    "symbol": "ACME"
-                }
-                earnings_reactions.save_state(earnings_snapshot)
+                earnings_reactions.update_state(mark_signal_sent)
+                earnings_reactions.set_state_record(
+                    "public",
+                    "report-key",
+                    {"symbol": "ACME"},
+                )
 
                 final_state = earnings_reactions.load_state()
 
-            self.assertFalse(
+            self.assertTrue(
                 final_state["signal_queue"]["token"]["sent_to_signals"]
             )
             self.assertIn("report-key", final_state["public"])
 
-    def test_load_state_preserves_corrupt_nested_section_types(self):
+    def test_load_state_rejects_corrupt_safety_sections(self):
         corrupt_state = {
             "public": [],
             "private": "invalid",
@@ -81,9 +81,8 @@ class StateWriteCharacterizationTests(NoNetworkTestCase):
             state_path.write_text(json.dumps(corrupt_state), encoding="utf-8")
 
             with patch.object(earnings_reactions, "STATE_FILE", state_path):
-                loaded = earnings_reactions.load_state()
-
-        self.assertEqual(loaded, corrupt_state)
+                with self.assertRaises(EarningsStateValidationError):
+                    earnings_reactions.load_state()
 
     def test_corrupt_signal_queue_fails_during_message_lookup(self):
         state = self.empty_state()
@@ -186,16 +185,6 @@ class PostingFailureCharacterizationTests(NoNetworkTestCase):
             )
             send_private = Mock()
             send_public = Mock()
-            real_save_state = earnings_reactions.save_state
-            save_calls = 0
-
-            def fail_second_save(state):
-                nonlocal save_calls
-                save_calls += 1
-                if save_calls == 2:
-                    raise OSError("simulated state save failure")
-                real_save_state(state)
-
             patches = self.main_patches(
                 state_path,
                 send_private,
@@ -207,8 +196,8 @@ class PostingFailureCharacterizationTests(NoNetworkTestCase):
                 stack.enter_context(
                     patch.object(
                         earnings_reactions,
-                        "save_state",
-                        side_effect=fail_second_save,
+                        "set_state_record",
+                        side_effect=OSError("simulated state save failure"),
                     )
                 )
                 stack.enter_context(redirect_stdout(StringIO()))
@@ -275,7 +264,7 @@ class PostingFailureCharacterizationTests(NoNetworkTestCase):
             earnings_reactions.PUBLIC_WEBHOOK_USERNAME,
         )
 
-    def test_corrupt_public_section_posts_then_fails_recording_duplicate_key(self):
+    def test_corrupt_public_section_fails_before_posting(self):
         state = self.empty_state()
         state["public"] = []
 
@@ -294,10 +283,10 @@ class PostingFailureCharacterizationTests(NoNetworkTestCase):
                 for manager in patches:
                     stack.enter_context(manager)
                 stack.enter_context(redirect_stdout(StringIO()))
-                with self.assertRaises(TypeError):
+                with self.assertRaises(EarningsStateValidationError):
                     earnings_reactions.main()
 
-        send_public.assert_called_once()
+        send_public.assert_not_called()
 
 
 class FakeCommandTree:
@@ -379,6 +368,19 @@ class SendToSignalsCharacterizationTests(unittest.IsolatedAsyncioTestCase):
             },
         }
 
+    @staticmethod
+    def transactional_update(persisted_state, failure=None):
+        def update(mutation):
+            latest = copy.deepcopy(persisted_state)
+            mutation(latest)
+            if failure is not None:
+                raise failure
+            persisted_state.clear()
+            persisted_state.update(copy.deepcopy(latest))
+            return copy.deepcopy(latest)
+
+        return update
+
     async def build_modal(self, signals_channel, review_channel):
         client = FakeDiscordClient(signals_channel, review_channel)
 
@@ -400,6 +402,11 @@ class SendToSignalsCharacterizationTests(unittest.IsolatedAsyncioTestCase):
                 earnings_reactions,
                 "resolve_webhook_channel_id",
                 return_value="200",
+            ),
+            patch.object(
+                earnings_reactions,
+                "load_state",
+                return_value=self.signal_state(sent=False),
             ),
             patch.object(discord, "Client", return_value=client),
             patch.object(
@@ -461,12 +468,12 @@ class SendToSignalsCharacterizationTests(unittest.IsolatedAsyncioTestCase):
                 "load_state",
                 return_value=self.signal_state(sent=True),
             ),
-            patch.object(earnings_reactions, "save_state") as save_state,
+            patch.object(earnings_reactions, "update_state") as update_state,
         ):
             await modal.on_submit(interaction)
 
         signals_channel.send.assert_not_awaited()
-        save_state.assert_not_called()
+        update_state.assert_not_called()
         self.assertIn(
             "already",
             interaction.followup.send.await_args.args[0].lower(),
@@ -494,9 +501,12 @@ class SendToSignalsCharacterizationTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(
                 earnings_reactions,
-                "save_state",
-                side_effect=OSError("simulated state save failure"),
-            ) as save_state,
+                "update_state",
+                side_effect=self.transactional_update(
+                    persisted_state,
+                    OSError("simulated state save failure"),
+                ),
+            ) as update_state,
             redirect_stdout(StringIO()),
         ):
             with self.assertRaisesRegex(OSError, "state save failure"):
@@ -505,7 +515,7 @@ class SendToSignalsCharacterizationTests(unittest.IsolatedAsyncioTestCase):
                 await modal.on_submit(interaction_two)
 
         self.assertEqual(signals_channel.send.await_count, 2)
-        self.assertEqual(save_state.call_count, 2)
+        self.assertEqual(update_state.call_count, 2)
         review_channel.fetch_message.assert_not_awaited()
         self.assertFalse(
             persisted_state["signal_queue"]["token"]["sent_to_signals"]
@@ -535,13 +545,13 @@ class SendToSignalsCharacterizationTests(unittest.IsolatedAsyncioTestCase):
                 "load_state",
                 return_value=state,
             ),
-            patch.object(earnings_reactions, "save_state") as save_state,
+            patch.object(earnings_reactions, "update_state") as update_state,
             redirect_stdout(StringIO()),
         ):
             await modal.on_submit(interaction)
 
         signals_channel.send.assert_awaited_once()
-        save_state.assert_not_called()
+        update_state.assert_not_called()
         review_channel.fetch_message.assert_not_awaited()
         self.assertFalse(
             state["signal_queue"]["token"]["sent_to_signals"]
