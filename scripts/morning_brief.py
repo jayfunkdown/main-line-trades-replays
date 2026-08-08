@@ -27,7 +27,6 @@ ECONOMIC_CALENDAR_URL = (
 
 FINNHUB_BASE_URL = "https://finnhub.io/api/v1"
 
-WEBHOOK_URL = os.environ["MORNING_BRIEF_WEBHOOK"].strip()
 FINNHUB_API_KEY = os.environ["FINNHUB_API_KEY"].strip()
 
 EASTERN = ZoneInfo("America/New_York")
@@ -35,7 +34,8 @@ EASTERN = ZoneInfo("America/New_York")
 DISCORD_MESSAGE_LIMIT = 2000
 SAFE_MESSAGE_LIMIT = 1900
 
-WEBHOOK_USERNAME = "Main Line Trades Morning Brief"
+MORNING_BRIEF_WEBHOOK_USERNAME = "Main Line Trades Morning Brief"
+EARNINGS_CALENDAR_WEBHOOK_USERNAME = "Main Line Trades Earnings Calendar"
 USER_AGENT = "MainLineTrades-MorningBrief/3.0"
 
 
@@ -899,6 +899,41 @@ def build_market_message(
         ]
     )
 
+    quote = random.choice(
+        TRADING_QUOTES
+    )
+
+    lines.extend(
+        [
+            "",
+            "## 🧠 Trading Focus",
+            "",
+            f"*“{quote}”*",
+            "",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "",
+            "## 🎥 Live Today",
+            "",
+            (
+                "Join Main Line Trades around "
+                "**8:30 AM Eastern** for the "
+                "New York Open session."
+            ),
+            "",
+            (
+                "📢 Live links will be posted in "
+                "**📢︱announcements**."
+            ),
+            "",
+            (
+                "Trade smart, manage your risk, "
+                "and we'll see you live! 📈"
+            ),
+            "",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        ]
+    )
+
     return "\n".join(lines).strip()
 
 
@@ -969,38 +1004,8 @@ def build_earnings_message(earnings):
             ]
         )
 
-    quote = random.choice(
-        TRADING_QUOTES
-    )
-
     lines.extend(
         [
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-            "",
-            "## 🧠 Trading Focus",
-            "",
-            f"*“{quote}”*",
-            "",
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-            "",
-            "## 🎥 Live Today",
-            "",
-            (
-                "Join Main Line Trades around "
-                "**8:30 AM Eastern** for the "
-                "New York Open session."
-            ),
-            "",
-            (
-                "📢 Live links will be posted in "
-                "**📢︱announcements**."
-            ),
-            "",
-            (
-                "Trade smart, manage your risk, "
-                "and we'll see you live! 📈"
-            ),
-            "",
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         ]
     )
@@ -1105,7 +1110,22 @@ def split_discord_message(
 # Discord posting
 # ============================================================
 
-def send_webhook_message(message):
+def required_webhook(name):
+    value = os.getenv(name, "").strip()
+
+    if not value:
+        raise RuntimeError(
+            f"{name} is required."
+        )
+
+    return value
+
+
+def send_webhook_message(
+    webhook_url,
+    username,
+    message,
+):
     if len(message) > DISCORD_MESSAGE_LIMIT:
         raise ValueError(
             "Discord message still exceeds "
@@ -1114,7 +1134,7 @@ def send_webhook_message(message):
 
     payload = json.dumps(
         {
-            "username": WEBHOOK_USERNAME,
+            "username": username,
             "content": message,
             "allowed_mentions": {
                 "parse": [],
@@ -1123,7 +1143,7 @@ def send_webhook_message(message):
     ).encode("utf-8")
 
     request = urllib.request.Request(
-        WEBHOOK_URL,
+        webhook_url,
         data=payload,
         headers={
             "Content-Type": "application/json",
@@ -1146,18 +1166,23 @@ def send_webhook_message(message):
             )
 
 
-def post_messages(messages):
+def post_messages(deliveries):
     message_number = 0
 
-    for index, message in enumerate(messages):
+    for index, delivery in enumerate(deliveries):
         if index > 0:
             time.sleep(10)
 
+        webhook_url, username, message = delivery
         chunks = split_discord_message(message)
 
         for chunk in chunks:
             message_number += 1
-            send_webhook_message(chunk)
+            send_webhook_message(
+                webhook_url,
+                username,
+                chunk,
+            )
 
     return message_number
 
@@ -1167,6 +1192,13 @@ def post_messages(messages):
 # ============================================================
 
 def main():
+    morning_brief_webhook = required_webhook(
+        "MORNING_BRIEF_WEBHOOK"
+    )
+    earnings_calendar_webhook = required_webhook(
+        "EARNINGS_CALENDAR_WEBHOOK"
+    )
+
     events = get_high_impact_usd_events()
     earnings = get_all_earnings()
     market_snapshot = get_market_snapshot()
@@ -1184,8 +1216,16 @@ def main():
 
     posted_message_count = post_messages(
         [
-            market_message,
-            earnings_message,
+            (
+                morning_brief_webhook,
+                MORNING_BRIEF_WEBHOOK_USERNAME,
+                market_message,
+            ),
+            (
+                earnings_calendar_webhook,
+                EARNINGS_CALENDAR_WEBHOOK_USERNAME,
+                earnings_message,
+            ),
         ]
     )
 
