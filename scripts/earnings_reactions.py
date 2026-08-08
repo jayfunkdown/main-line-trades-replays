@@ -154,6 +154,14 @@ class AmbiguousDeliveryError(RuntimeError):
     """Discord may have accepted the delivery; automatic retry is unsafe."""
 
 
+class PublicChartPreparationError(DefiniteDeliveryError):
+    """Public chart preparation failed before Discord was contacted."""
+
+
+class PublicChartPreparationCancelled(asyncio.CancelledError):
+    """Public chart preparation was canceled before Discord was contacted."""
+
+
 PRIORITY_TICKERS = {
     "AAPL",
     "ABNB",
@@ -1185,11 +1193,13 @@ def aggregate_weekly_candles(
 
 def generate_weekly_chart(
     symbol: str,
+    *,
+    output_path: Path | None = None,
 ) -> Path:
     """
-    Generate the private review-only weekly candlestick chart.
+    Generate the earnings weekly candlestick chart.
 
-    This chart is only for scanning inside earnings-review.
+    This chart is used for public Earnings Movers and private review posts.
     The final Signals post uses the user's pasted TradingView chart.
     """
     try:
@@ -1212,7 +1222,10 @@ def generate_weekly_chart(
     chart_dir = PROJECT_ROOT / "data" / "earnings_charts"
     chart_dir.mkdir(parents=True, exist_ok=True)
 
-    output_path = chart_dir / f"{symbol.upper()}_weekly.png"
+    if output_path is None:
+        output_path = chart_dir / f"{symbol.upper()}_weekly.png"
+    else:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
 
     background = "#05070B"
     grid_color = "#202938"
@@ -1320,6 +1333,32 @@ def generate_weekly_chart(
 
     return output_path
 
+
+def temporary_weekly_chart_path(symbol: str) -> Path:
+    """Return a unique public-chart path without creating the file."""
+    chart_dir = PROJECT_ROOT / "data" / "earnings_charts"
+    chart_dir.mkdir(parents=True, exist_ok=True)
+    safe_symbol = re.sub(r"[^A-Za-z0-9._-]", "_", symbol.upper())
+    return chart_dir / f".{safe_symbol}_weekly_{uuid.uuid4().hex}.tmp.png"
+
+
+def weekly_chart_filename(symbol: str) -> str:
+    """Return the clean member-facing weekly chart filename."""
+    safe_symbol = re.sub(r"[^A-Za-z0-9._-]", "_", symbol.upper())
+    return f"{safe_symbol}_weekly.png"
+
+
+def cleanup_weekly_chart(path: Path) -> None:
+    """Best-effort cleanup that cannot change a delivery outcome."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        print(
+            "Could not remove temporary earnings chart:",
+            repr(exc),
+            flush=True,
+        )
+
 def resolve_webhook_channel_id(
     webhook_url: str,
 ) -> str:
@@ -1390,6 +1429,7 @@ def multipart_body(
     *,
     payload: dict[str, Any],
     file_path: Path,
+    file_name: str | None = None,
 ) -> tuple[bytes, str]:
     """
     Build Discord multipart/form-data correctly.
@@ -1407,6 +1447,7 @@ def multipart_body(
 
     crlf = b"\r\n"
     file_bytes = file_path.read_bytes()
+    attachment_name = file_name or file_path.name
 
     parts: list[bytes] = []
 
@@ -1444,7 +1485,7 @@ def multipart_body(
         (
             'Content-Disposition: form-data; '
             'name="files[0]"; '
-            f'filename="{file_path.name}"'
+            f'filename="{attachment_name}"'
         ).encode("utf-8")
         + crlf
     )
@@ -4518,60 +4559,98 @@ def send_discord_message(
     webhook_url: str,
     message: str,
     username: str,
+    *,
+    chart_symbol: str | None = None,
 ) -> str | None:
-    payload = json.dumps(
-        {
-            "username": username,
-            "content": message,
-            "allowed_mentions": {"parse": []},
-        }
-    ).encode("utf-8")
+    payload_data = {
+        "username": username,
+        "content": message,
+        "allowed_mentions": {"parse": []},
+    }
+    chart_path: Path | None = None
 
-    for attempt in range(1, MAX_DISCORD_ATTEMPTS + 1):
-        request = urllib.request.Request(
-            webhook_url,
-            data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": USER_AGENT,
-            },
-            method="POST",
-        )
-
-        try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                if response.status not in (200, 204):
-                    raise AmbiguousDeliveryError(
-                        f"Discord returned HTTP {response.status}."
-                    )
-                if response.status == 200:
-                    try:
-                        response_payload = json.loads(
-                            response.read().decode("utf-8")
-                        )
-                    except (json.JSONDecodeError, UnicodeDecodeError):
-                        return None
-                    if isinstance(response_payload, dict):
-                        message_id = response_payload.get("id")
-                        if message_id:
-                            return str(message_id)
-                return None
-
-        except urllib.error.HTTPError as exc:
-            if exc.code != 429 or attempt >= MAX_DISCORD_ATTEMPTS:
-                body = exc.read().decode("utf-8", errors="replace")
-                raise DefiniteDeliveryError(
-                    f"Discord returned HTTP {exc.code}: {body}"
+    try:
+        if chart_symbol is None:
+            payload = json.dumps(payload_data).encode("utf-8")
+            content_type = "application/json"
+        else:
+            try:
+                chart_path = temporary_weekly_chart_path(chart_symbol)
+                chart_path = generate_weekly_chart(
+                    chart_symbol,
+                    output_path=chart_path,
+                )
+                attachment_name = weekly_chart_filename(chart_symbol)
+                payload_data["attachments"] = [
+                    {
+                        "id": 0,
+                        "filename": attachment_name,
+                        "description": f"{chart_symbol} weekly chart",
+                    }
+                ]
+                payload, boundary = multipart_body(
+                    payload=payload_data,
+                    file_path=chart_path,
+                    file_name=attachment_name,
+                )
+                content_type = f"multipart/form-data; boundary={boundary}"
+            except asyncio.CancelledError as exc:
+                raise PublicChartPreparationCancelled(
+                    "Public chart preparation was canceled."
+                ) from exc
+            except Exception as exc:
+                raise PublicChartPreparationError(
+                    "Public chart preparation failed."
                 ) from exc
 
-            wait_seconds = discord_retry_seconds(exc, attempt)
-            print(
-                "Discord rate limit reached. "
-                f"Waiting {wait_seconds:.1f} seconds..."
+        for attempt in range(1, MAX_DISCORD_ATTEMPTS + 1):
+            request = urllib.request.Request(
+                webhook_url,
+                data=payload,
+                headers={
+                    "Content-Type": content_type,
+                    "User-Agent": USER_AGENT,
+                },
+                method="POST",
             )
-            time.sleep(wait_seconds)
 
-    raise DefiniteDeliveryError("Discord post failed after retries.")
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    if response.status not in (200, 204):
+                        raise AmbiguousDeliveryError(
+                            f"Discord returned HTTP {response.status}."
+                        )
+                    if response.status == 200:
+                        try:
+                            response_payload = json.loads(
+                                response.read().decode("utf-8")
+                            )
+                        except (json.JSONDecodeError, UnicodeDecodeError):
+                            return None
+                        if isinstance(response_payload, dict):
+                            message_id = response_payload.get("id")
+                            if message_id:
+                                return str(message_id)
+                    return None
+
+            except urllib.error.HTTPError as exc:
+                if exc.code != 429 or attempt >= MAX_DISCORD_ATTEMPTS:
+                    body = exc.read().decode("utf-8", errors="replace")
+                    raise DefiniteDeliveryError(
+                        f"Discord returned HTTP {exc.code}: {body}"
+                    ) from exc
+
+                wait_seconds = discord_retry_seconds(exc, attempt)
+                print(
+                    "Discord rate limit reached. "
+                    f"Waiting {wait_seconds:.1f} seconds..."
+                )
+                time.sleep(wait_seconds)
+
+        raise DefiniteDeliveryError("Discord post failed after retries.")
+    finally:
+        if chart_path is not None:
+            cleanup_weekly_chart(chart_path)
 
 
 def earnings_state_store() -> EarningsStateStore:
@@ -5443,13 +5522,18 @@ def main() -> None:
                 public_webhook,
                 build_public_message(candidate),
                 PUBLIC_WEBHOOK_USERNAME,
+                chart_symbol=candidate["symbol"],
             )
         except asyncio.CancelledError as exc:
             transition_feed_delivery(
                 "public",
                 key,
                 attempt_id,
-                FEED_DELIVERY_UNKNOWN,
+                (
+                    FEED_DELIVERY_FAILED
+                    if isinstance(exc, PublicChartPreparationCancelled)
+                    else FEED_DELIVERY_UNKNOWN
+                ),
                 error=concise_delivery_error(exc),
             )
             raise

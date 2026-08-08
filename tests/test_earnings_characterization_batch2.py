@@ -286,6 +286,7 @@ class PostingFailureCharacterizationTests(NoNetworkTestCase):
             "public-webhook",
             "public message",
             earnings_reactions.PUBLIC_WEBHOOK_USERNAME,
+            chart_symbol="ACME",
         )
 
     def test_corrupt_public_section_fails_before_posting(self):

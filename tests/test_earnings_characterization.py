@@ -373,6 +373,7 @@ class DuplicatePostingTests(NoNetworkTestCase):
             "public-webhook",
             "public message",
             earnings_reactions.PUBLIC_WEBHOOK_USERNAME,
+            chart_symbol="ACME",
         )
         self.assertIn(self.key, state["public"])
         self.assertIn("0 private posted, 1 public posted", output)
