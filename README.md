@@ -2,6 +2,35 @@
 
 This repository powers the Main Line Trades Discord automation system.
 
+## Development setup
+
+Python 3.10 or newer is required.
+
+Create and activate a virtual environment:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+```
+
+On Windows PowerShell, activate it with:
+
+```powershell
+.venv\Scripts\Activate.ps1
+```
+
+Install the project dependencies:
+
+```bash
+python -m pip install .
+```
+
+Run the complete non-posting test suite:
+
+```bash
+python -m unittest discover -v
+```
+
 ## Current Automations
 
 ### 🎥 YouTube Replay Bot

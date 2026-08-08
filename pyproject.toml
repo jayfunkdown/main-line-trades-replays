@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "main-line-trades-replays"
+version = "0.1.0"
+description = "Main Line Trades Discord automation"
+requires-python = ">=3.10"
+dependencies = [
+    "discord.py>=2.7",
+    "matplotlib",
+    "python-dotenv",
+    "tzdata; platform_system == 'Windows'",
+]
+
+[tool.setuptools]
+packages = []
