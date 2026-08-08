@@ -3568,9 +3568,33 @@ async def run_review_button_bot() -> None:
                     "was published successfully to Signals",
                 )
                 try:
-                    await draft_message.edit(view=ManualSignalClosedView("Published"))
+                    await draft_message.delete()
+                except discord.NotFound:
+                    pass
                 except Exception as exc:
-                    print("Could not mark manual signal draft published:", repr(exc), flush=True)
+                    await write_manual_signal_log(
+                        record["instrument"],
+                        interaction.user,
+                        "draft deletion failed after successful publication",
+                    )
+                    try:
+                        await draft_message.edit(
+                            view=ManualSignalClosedView("Published")
+                        )
+                    except Exception as fallback_exc:
+                        print(
+                            "Could not disable published Manual Signal controls:",
+                            repr(fallback_exc),
+                            flush=True,
+                        )
+                    await send_ephemeral_rejection(
+                        interaction,
+                        (
+                            "The signal was published, but its draft message "
+                            "requires manual cleanup."
+                        ),
+                    )
+                    return
                 try:
                     await interaction.delete_original_response()
                 except Exception:
