@@ -33,6 +33,9 @@ YOUTUBE_API_BASE = "https://www.googleapis.com/youtube/v3"
 USER_AGENT = "MainLineTrades-ReplayBot/4.0"
 
 STATE_PATH = PROJECT_ROOT / "data" / "posted_ids.json"
+TRAINING_STATE_PATH = PROJECT_ROOT / "data" / "training_posted_ids.json"
+
+TRAINING_PLAYLIST_ID = "PLqMtQ22Ff3lF6HlsG2fpM96IQZ77hWGGt"
 
 DEFAULT_TITLE_PREFIX = "🔴 Live Trading"
 DEFAULT_FETCH_LIMIT = 25
@@ -50,6 +53,12 @@ EMBED_DESCRIPTION = (
     "Missed the live session? Watch the complete trading replay below."
 )
 EMBED_FOOTER = "Main Line Trades • Live Trading Replay"
+
+TRAINING_WEBHOOK_USERNAME = "Main Line Trades Training Videos"
+TRAINING_EMBED_DESCRIPTION = (
+    "Build your trading knowledge with this Main Line Trades tutorial."
+)
+TRAINING_EMBED_FOOTER = "Main Line Trades • Training Video"
 
 # Used only by --test so the test has the same full visual layout,
 # including the large image.
@@ -77,13 +86,13 @@ def required_env(name: str) -> str:
 # State handling
 # ============================================================
 
-def load_processed_ids() -> list[str]:
-    if not STATE_PATH.exists():
+def load_processed_ids(state_path: Path = STATE_PATH) -> list[str]:
+    if not state_path.exists():
         return []
 
     try:
         value = json.loads(
-            STATE_PATH.read_text(encoding="utf-8")
+            state_path.read_text(encoding="utf-8")
         )
     except (OSError, json.JSONDecodeError):
         return []
@@ -94,8 +103,11 @@ def load_processed_ids() -> list[str]:
     return [str(item) for item in value]
 
 
-def save_processed_ids(video_ids: list[str]) -> None:
-    STATE_PATH.parent.mkdir(
+def save_processed_ids(
+    video_ids: list[str],
+    state_path: Path = STATE_PATH,
+) -> None:
+    state_path.parent.mkdir(
         parents=True,
         exist_ok=True,
     )
@@ -104,7 +116,7 @@ def save_processed_ids(video_ids: list[str]) -> None:
         dict.fromkeys(str(item) for item in video_ids)
     )
 
-    STATE_PATH.write_text(
+    state_path.write_text(
         json.dumps(
             unique_ids[-MAX_STATE_IDS:],
             indent=2,
@@ -118,12 +130,13 @@ def mark_processed(
     video_id: str,
     processed_ids: list[str],
     processed_set: set[str],
+    state_path: Path = STATE_PATH,
 ) -> None:
     if video_id not in processed_set:
         processed_ids.append(video_id)
         processed_set.add(video_id)
 
-    save_processed_ids(processed_ids)
+    save_processed_ids(processed_ids, state_path)
 
 
 # ============================================================
@@ -446,6 +459,52 @@ def fetch_matching_uploads(
     )
 
 
+def fetch_playlist_videos(
+    playlist_id: str,
+    api_key: str,
+    fetch_limit: int = MAX_STATE_IDS,
+) -> list[dict[str, str]]:
+    video_ids: list[str] = []
+    page_token = ""
+
+    while len(video_ids) < fetch_limit:
+        parameters: dict[str, str | int] = {
+            "part": "contentDetails",
+            "playlistId": playlist_id,
+            "maxResults": min(50, fetch_limit - len(video_ids)),
+        }
+        if page_token:
+            parameters["pageToken"] = page_token
+
+        response = youtube_api_get(
+            "playlistItems",
+            parameters,
+            api_key,
+        )
+
+        for item in response.get("items", []):
+            if not isinstance(item, dict):
+                continue
+            content_details = item.get("contentDetails") or {}
+            if not isinstance(content_details, dict):
+                continue
+            video_id = str(content_details.get("videoId") or "").strip()
+            if video_id and video_id not in video_ids:
+                video_ids.append(video_id)
+
+        page_token = str(response.get("nextPageToken") or "").strip()
+        if not page_token:
+            break
+
+    videos: list[dict[str, str]] = []
+    for start in range(0, len(video_ids), 50):
+        videos.extend(
+            fetch_video_details(video_ids[start : start + 50], api_key)
+        )
+
+    return sorted(videos, key=lambda item: item["published"])
+
+
 # ============================================================
 # Exact approved Discord embed
 # ============================================================
@@ -526,6 +585,40 @@ def build_replay_embed(
     return embed
 
 
+def build_training_embed(
+    video: dict[str, str],
+) -> dict[str, Any]:
+    embed: dict[str, Any] = {
+        "color": EMBED_COLOR,
+        "author": {"name": EMBED_AUTHOR},
+        "title": f"🎓 {video['title'].strip()}",
+        "url": video["url"],
+        "description": TRAINING_EMBED_DESCRIPTION,
+        "fields": [
+            {
+                "name": "📅 Published",
+                "value": format_stream_date(video.get("published", "")),
+                "inline": True,
+            },
+            {
+                "name": "⏱️ Duration",
+                "value": video.get("duration", "Unknown"),
+                "inline": True,
+            },
+            {
+                "name": "▶️ Watch Tutorial",
+                "value": f"[Open the full tutorial]({video['url']})",
+                "inline": False,
+            },
+        ],
+        "footer": {"text": TRAINING_EMBED_FOOTER},
+    }
+    thumbnail = video.get("thumbnail", "").strip()
+    if thumbnail:
+        embed["image"] = {"url": thumbnail}
+    return embed
+
+
 # ============================================================
 # Discord webhook
 # ============================================================
@@ -567,15 +660,14 @@ def discord_retry_seconds(
     return float(2 ** attempt)
 
 
-def post_replay_embed(
+def post_video_embed(
     webhook_url: str,
-    video: dict[str, str],
+    embed: dict[str, Any],
+    username: str,
 ) -> None:
     payload = {
-        "username": WEBHOOK_USERNAME,
-        "embeds": [
-            build_replay_embed(video)
-        ],
+        "username": username,
+        "embeds": [embed],
         "allowed_mentions": {
             "parse": [],
         },
@@ -636,6 +728,28 @@ def post_replay_embed(
     )
 
 
+def post_replay_embed(
+    webhook_url: str,
+    video: dict[str, str],
+) -> None:
+    post_video_embed(
+        webhook_url,
+        build_replay_embed(video),
+        WEBHOOK_USERNAME,
+    )
+
+
+def post_training_embed(
+    webhook_url: str,
+    video: dict[str, str],
+) -> None:
+    post_video_embed(
+        webhook_url,
+        build_training_embed(video),
+        TRAINING_WEBHOOK_USERNAME,
+    )
+
+
 # ============================================================
 # CLI
 # ============================================================
@@ -673,6 +787,29 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Post one full styled test embed."
         ),
+    )
+
+    parser.add_argument(
+        "--feed",
+        choices=("replay", "training"),
+        default="replay",
+        help="YouTube feed to process (default: replay).",
+    )
+
+    parser.add_argument(
+        "--import-existing",
+        action="store_true",
+        help=(
+            "For the training feed only, deliberately post every current "
+            "unprocessed playlist video oldest to newest."
+        ),
+    )
+
+    parser.add_argument(
+        "--playlist-limit",
+        type=int,
+        default=MAX_STATE_IDS,
+        help="Maximum training playlist items inspected (default: 500).",
     )
 
     parser.add_argument(
@@ -729,12 +866,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 def preview_video(
     video: dict[str, str],
+    feed: str = "replay",
 ) -> None:
+    label = "TRAINING VIDEO" if feed == "training" else "YOUTUBE REPLAY"
+    title = (
+        video["title"].strip()
+        if feed == "training"
+        else clean_display_title(video["title"])
+    )
     print(
         "\n"
-        "===== YOUTUBE REPLAY PREVIEW =====\n"
+        f"===== {label} PREVIEW =====\n"
         f"Video ID: {video['id']}\n"
-        f"Title: {clean_display_title(video['title'])}\n"
+        f"Title: {title}\n"
         f"Date: {format_stream_date(video['published'])}\n"
         f"Duration: {video['duration']}\n"
         f"Thumbnail: {video['thumbnail']}\n"
@@ -772,11 +916,23 @@ def main() -> int:
             "--max-age-hours must be at least 1"
         )
 
+    if not 1 <= args.playlist_limit <= MAX_STATE_IDS:
+        parser.error(
+            f"--playlist-limit must be between 1 and {MAX_STATE_IDS}"
+        )
+
+    if args.import_existing and args.feed != "training":
+        parser.error("--import-existing is available only for --feed training")
+
     webhook_url = ""
 
     if args.post or args.test:
         webhook_url = required_env(
-            "DISCORD_WEBHOOK_URL"
+            (
+                "TRAINING_VIDEOS_WEBHOOK"
+                if args.feed == "training"
+                else "DISCORD_WEBHOOK_URL"
+            )
         )
 
     api_key = required_env(
@@ -808,17 +964,22 @@ def main() -> int:
                 ),
             }
 
-        post_replay_embed(
-            webhook_url,
-            test_video,
-        )
+        if args.feed == "training":
+            post_training_embed(webhook_url, test_video)
+        else:
+            post_replay_embed(webhook_url, test_video)
 
         print(
-            "Full styled replay embed posted to Discord."
+            f"Full styled {args.feed} embed posted to Discord."
         )
         return 0
 
-    processed_ids = load_processed_ids()
+    state_path = (
+        TRAINING_STATE_PATH
+        if args.feed == "training"
+        else STATE_PATH
+    )
+    processed_ids = load_processed_ids(state_path)
     processed_set = set(processed_ids)
 
     if args.video_id:
@@ -828,6 +989,23 @@ def main() -> int:
                 api_key,
             )
         ]
+    elif args.feed == "training":
+        videos = fetch_playlist_videos(
+            TRAINING_PLAYLIST_ID,
+            api_key,
+            args.playlist_limit,
+        )
+
+        if args.post and not processed_ids and not args.import_existing:
+            save_processed_ids(
+                [video["id"] for video in videos],
+                state_path,
+            )
+            print(
+                f"Initialized training state with {len(videos)} existing "
+                "playlist video(s). Nothing posted."
+            )
+            return 0
     else:
         channel_id = required_env(
             "YOUTUBE_CHANNEL_ID"
@@ -846,7 +1024,8 @@ def main() -> int:
                 [
                     video["id"]
                     for video in videos
-                ]
+                ],
+                state_path,
             )
 
             print(
@@ -880,7 +1059,7 @@ def main() -> int:
 
     # Exact video preview is always allowed, even if already processed.
     if args.video_id and args.preview:
-        preview_video(videos[0])
+        preview_video(videos[0], args.feed)
         print(
             "Preview mode did not post anything "
             "or change state."
@@ -894,30 +1073,37 @@ def main() -> int:
     ]
 
     if not new_videos:
-        print("No new eligible replay found.")
+        print(f"No new eligible {args.feed} video found.")
         return 0
 
     handled = 0
 
+    post_limit = (
+        len(new_videos)
+        if args.import_existing
+        else args.limit
+    )
+
     for video in new_videos:
-        if handled >= args.limit:
+        if handled >= post_limit:
             break
 
         handled += 1
 
         if args.preview:
-            preview_video(video)
+            preview_video(video, args.feed)
             continue
 
-        post_replay_embed(
-            webhook_url,
-            video,
-        )
+        if args.feed == "training":
+            post_training_embed(webhook_url, video)
+        else:
+            post_replay_embed(webhook_url, video)
 
         mark_processed(
             video["id"],
             processed_ids,
             processed_set,
+            state_path,
         )
 
         print(
@@ -928,7 +1114,7 @@ def main() -> int:
 
     if args.preview:
         print(
-            f"Finished. Previewed {handled} replay(s)."
+            f"Finished. Previewed {handled} {args.feed} video(s)."
         )
         print(
             "Preview mode did not post anything "
@@ -936,7 +1122,7 @@ def main() -> int:
         )
     else:
         print(
-            f"Finished. Posted {handled} replay(s)."
+            f"Finished. Posted {handled} {args.feed} video(s)."
         )
 
     return 0

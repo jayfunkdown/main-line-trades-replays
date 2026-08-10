@@ -37,6 +37,12 @@ python -m unittest discover -v
 
 Posts completed livestream replays automatically.
 
+### 🎓 Training Video Feed
+
+Checks the curated Main Line Trades training playlist every 30 minutes and
+posts newly added tutorials as bordered Discord cards. Its processed-video
+state is independent from the livestream replay feed.
+
 ### 🌅 Morning Brief
 
 Posts every weekday before the New York Open with:
