@@ -404,6 +404,17 @@ explicitly requests a content redesign. Raw intake channels, internal bot logs,
 ephemeral interaction responses, and normal member messages do not require
 embed cards.
 
+The bordered card is a wrapper around the approved presentation, not a reason
+to compress or redesign it. When converting an existing polished post, preserve
+the original Markdown hierarchy, large headings, blank-line spacing, emojis,
+dividers, wording, disclaimers, and chart placement inside the embed description.
+Avoid replacing that layout with tightly stacked embed fields unless the user
+explicitly approves a compact field-based design.
+
+The Training Videos and Past Live Streams card layouts are already approved.
+Do not redesign or migrate those two feeds unless the user makes a new explicit
+request for them.
+
 New public or staff-facing publishing features must inherit this presentation
 standard by default.
 

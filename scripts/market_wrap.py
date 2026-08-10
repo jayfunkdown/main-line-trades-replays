@@ -9,6 +9,8 @@ import argparse
 import json
 import os
 import sys
+import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime
 
@@ -45,6 +47,18 @@ CROSS_MARKET_SYMBOLS = [
     ("UUP", "U.S. Dollar ETF"),
 ]
 
+GLOBAL_MARKET_SYMBOLS = [
+    ("^N225", "Nikkei 225"),
+    ("^HSI", "Hang Seng"),
+    ("000001.SS", "Shanghai Composite"),
+    ("^NSEI", "Nifty 50"),
+    ("^FTSE", "FTSE 100"),
+    ("^GDAXI", "DAX"),
+    ("^FCHI", "CAC 40"),
+]
+
+YAHOO_CHART_BASE = "https://query1.finance.yahoo.com/v8/finance/chart"
+
 
 def get_named_quotes(symbols, *, is_crypto=False):
     return [
@@ -71,6 +85,82 @@ def get_cross_market_snapshot():
         for symbol, name in CROSS_MARKET_SYMBOLS
     ]
     return get_named_quotes(symbols)
+
+
+def yahoo_index_chart_url(symbol):
+    encoded_symbol = urllib.parse.quote(symbol)
+    query = urllib.parse.urlencode(
+        {
+            "range": "5d",
+            "interval": "1d",
+            "includeAdjustedClose": "true",
+        }
+    )
+    return f"{YAHOO_CHART_BASE}/{encoded_symbol}?{query}"
+
+
+def get_yahoo_index_quote(symbol):
+    request = urllib.request.Request(
+        yahoo_index_chart_url(symbol),
+        headers={
+            "Accept": "application/json",
+            "User-Agent": USER_AGENT,
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        result = payload["chart"]["result"][0]
+        meta = result["meta"]
+        closes = [
+            float(value)
+            for value in result["indicators"]["quote"][0]["close"]
+            if value is not None
+        ]
+        price = meta.get("regularMarketPrice")
+        previous_close = (
+            meta.get("chartPreviousClose")
+            or meta.get("previousClose")
+        )
+
+        if price is None and closes:
+            price = closes[-1]
+        if previous_close is None and len(closes) >= 2:
+            previous_close = closes[-2]
+
+        price = float(price)
+        previous_close = float(previous_close)
+        if previous_close == 0:
+            raise ValueError("previous close is zero")
+
+        return {
+            "price": price,
+            "percent_change": ((price - previous_close) / previous_close) * 100,
+        }
+    except (
+        urllib.error.HTTPError,
+        urllib.error.URLError,
+        TimeoutError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        KeyError,
+        IndexError,
+        TypeError,
+        ValueError,
+    ):
+        return None
+
+
+def get_global_market_snapshot():
+    return [
+        {
+            "symbol": display_name,
+            "name": display_name,
+            "quote": get_yahoo_index_quote(yahoo_symbol),
+        }
+        for yahoo_symbol, display_name in GLOBAL_MARKET_SYMBOLS
+    ]
 
 
 def available_changes(items):
@@ -111,6 +201,44 @@ def quote_block(items):
         morning_brief.quote_line(item)
         for item in items
     ) or "• Data unavailable"
+
+
+def global_market_line(item):
+    quote = item.get("quote")
+    name = str(item.get("name") or item.get("symbol") or "Unknown index")
+
+    if not quote:
+        return f"• **{name}:** Unavailable"
+
+    price = quote.get("price")
+    change = quote.get("percent_change")
+    if not isinstance(price, (int, float)) or isinstance(price, bool):
+        return f"• **{name}:** Unavailable"
+    if not isinstance(change, (int, float)) or isinstance(change, bool):
+        return f"• **{name}:** {price:,.2f}"
+
+    direction = "▲" if change > 0 else "▼" if change < 0 else "•"
+    return f"{direction} **{name}:** {price:,.2f} ({change:+.2f}%)"
+
+
+def global_market_block(items):
+    return "\n".join(global_market_line(item) for item in items) or "• Data unavailable"
+
+
+def market_wrap_description(date_label, sections):
+    parts = [
+        f"**{date_label}**",
+        (
+            "The closing snapshot for U.S. and global markets, crypto, "
+            "and key cross-market signals."
+        ),
+    ]
+
+    parts.extend(
+        f"## {section['name']}\n{section['value']}"
+        for section in sections
+    )
+    return "\n\n".join(parts)
 
 
 def economic_results_block(events, limit=DISCORD_EMBED_FIELD_VALUE_LIMIT):
@@ -170,22 +298,28 @@ def build_market_wrap_payload(
     crypto_snapshot,
     cross_market_snapshot,
     economic_events=None,
+    global_market_snapshot=None,
     *,
     now=None,
 ):
     current_time = now or datetime.now(morning_brief.EASTERN)
     date_label = current_time.strftime("%A, %B %d, %Y")
 
-    fields = [
+    sections = [
         {
             "name": "📈 U.S. Market Close",
             "value": quote_block(market_snapshot),
             "inline": False,
         },
+        {
+            "name": "🌍 Global Markets",
+            "value": global_market_block(global_market_snapshot or []),
+            "inline": False,
+        },
     ]
 
     if economic_events:
-        fields.append(
+        sections.append(
             {
                 "name": "📅 High-Impact Economic Results",
                 "value": economic_results_block(economic_events),
@@ -193,7 +327,7 @@ def build_market_wrap_payload(
             }
         )
 
-    fields.extend(
+    sections.extend(
         [
             {
                 "name": "₿ Crypto Snapshot",
@@ -219,6 +353,7 @@ def build_market_wrap_payload(
             },
         ]
     )
+    description = market_wrap_description(date_label, sections)
 
     payload = {
         "username": MARKET_WRAP_WEBHOOK_USERNAME,
@@ -226,12 +361,8 @@ def build_market_wrap_payload(
         "embeds": [
             {
                 "title": "🌆 Main Line Trades Market Wrap",
-                "description": (
-                    f"**{date_label}**\n"
-                    "The closing snapshot for U.S. markets, crypto, and key cross-market signals."
-                ),
+                "description": description,
                 "color": market_wrap_color(market_snapshot),
-                "fields": fields,
                 "footer": {
                     "text": "Market data is informational and may be delayed. Not financial advice."
                 },
@@ -353,11 +484,13 @@ def main(argv=None):
     economic_events = morning_brief.get_high_impact_usd_events()
     crypto_snapshot = get_crypto_snapshot()
     cross_market_snapshot = get_cross_market_snapshot()
+    global_market_snapshot = get_global_market_snapshot()
     payload = build_market_wrap_payload(
         market_snapshot,
         crypto_snapshot,
         cross_market_snapshot,
         economic_events,
+        global_market_snapshot,
     )
 
     if args.preview:
