@@ -41,6 +41,14 @@ class FakeResponse:
         return False
 
 
+class JsonResponse(FakeResponse):
+    def __init__(self, payload):
+        self.payload = payload
+
+    def read(self):
+        return json.dumps(self.payload).encode("utf-8")
+
+
 class WindowsConsole:
     encoding = "cp1252"
 
@@ -76,6 +84,15 @@ class MarketWrapTests(unittest.TestCase):
             item("USO", "Oil ETF", 80.0, -0.5),
             item("UUP", "U.S. Dollar ETF", 30.0, 0.1),
         ]
+        self.global_markets = [
+            item("Nikkei 225", "Nikkei 225", 42000.0, 0.8),
+            item("Hang Seng", "Hang Seng", 25000.0, -0.4),
+            item("Shanghai Composite", "Shanghai Composite", 3600.0, 0.2),
+            item("Nifty 50", "Nifty 50", 24500.0, 1.1),
+            item("FTSE 100", "FTSE 100", 9100.0, -0.1),
+            item("DAX", "DAX", 23500.0, 0.5),
+            item("CAC 40", "CAC 40", 7800.0, -0.3),
+        ]
         self.economic_events = [
             {
                 "title": "CPI m/m",
@@ -92,6 +109,7 @@ class MarketWrapTests(unittest.TestCase):
             self.crypto,
             self.cross_market,
             self.economic_events,
+            self.global_markets,
             now=datetime(2026, 8, 10, 16, 15),
         )
 
@@ -104,25 +122,32 @@ class MarketWrapTests(unittest.TestCase):
 
         embed = payload["embeds"][0]
         self.assertEqual(embed["color"], 0x00CFFF)
-        self.assertIn("Monday, August 10, 2026", embed["description"])
+        description = embed["description"]
+        self.assertNotIn("fields", embed)
+        self.assertIn("Monday, August 10, 2026", description)
+        headings = [
+            "📈 U.S. Market Close",
+            "🌍 Global Markets",
+            "📅 High-Impact Economic Results",
+            "₿ Crypto Snapshot",
+            "🌐 Key Markets",
+            "🧠 Session Read",
+            "🔭 Next Session",
+        ]
         self.assertEqual(
-            [field["name"] for field in embed["fields"]],
-            [
-                "📈 U.S. Market Close",
-                "📅 High-Impact Economic Results",
-                "₿ Crypto Snapshot",
-                "🌐 Key Markets",
-                "🧠 Session Read",
-                "🔭 Next Session",
-            ],
+            [description.index(f"## {heading}") for heading in headings],
+            sorted(description.index(f"## {heading}") for heading in headings),
         )
-        self.assertIn("**SPY — S&P 500 ETF:** $700.00 (+1.00%)", embed["fields"][0]["value"])
-        self.assertIn("**8:30 AM — CPI m/m**", embed["fields"][1]["value"])
-        self.assertIn("Actual: **0.2%**", embed["fields"][1]["value"])
-        self.assertIn("Forecast: **0.3%**", embed["fields"][1]["value"])
-        self.assertIn("Previous: **0.1%**", embed["fields"][1]["value"])
-        self.assertIn("**BTC — Bitcoin:** $100,000 (+2.50%)", embed["fields"][2]["value"])
-        self.assertIn("**GLD — Gold ETF:** $300.00 (+0.80%)", embed["fields"][3]["value"])
+        self.assertTrue(all(f"\n\n## {heading}\n" in description for heading in headings))
+        self.assertIn("**SPY — S&P 500 ETF:** $700.00 (+1.00%)", description)
+        self.assertIn("▲ **Nikkei 225:** 42,000.00 (+0.80%)", description)
+        self.assertIn("▼ **Hang Seng:** 25,000.00 (-0.40%)", description)
+        self.assertIn("**8:30 AM — CPI m/m**", description)
+        self.assertIn("Actual: **0.2%**", description)
+        self.assertIn("Forecast: **0.3%**", description)
+        self.assertIn("Previous: **0.1%**", description)
+        self.assertIn("**BTC — Bitcoin:** $100,000 (+2.50%)", description)
+        self.assertIn("**GLD — Gold ETF:** $300.00 (+0.80%)", description)
 
     def test_quiet_day_omits_economic_results_section(self):
         payload = market_wrap.build_market_wrap_payload(
@@ -130,14 +155,14 @@ class MarketWrapTests(unittest.TestCase):
             self.crypto,
             self.cross_market,
             [],
+            self.global_markets,
             now=datetime(2026, 8, 10, 16, 15),
         )
 
-        field_names = [
-            field["name"]
-            for field in payload["embeds"][0]["fields"]
-        ]
-        self.assertNotIn("📅 High-Impact Economic Results", field_names)
+        self.assertNotIn(
+            "## 📅 High-Impact Economic Results",
+            payload["embeds"][0]["description"],
+        )
 
     def test_economic_results_are_capped_with_omission_count(self):
         events = [
@@ -178,19 +203,19 @@ class MarketWrapTests(unittest.TestCase):
             [{"symbol": "SPY", "name": "S&P 500 ETF", "quote": None}],
             [],
             [],
+            [],
             now=datetime(2026, 8, 10, 16, 15),
         )
 
-        fields = payload["embeds"][0]["fields"]
-        self.assertIn("Unavailable", fields[0]["value"])
-        self.assertEqual(fields[1]["value"], "• Data unavailable")
-        self.assertEqual(fields[2]["value"], "• Data unavailable")
+        description = payload["embeds"][0]["description"]
+        self.assertIn("Unavailable", description)
+        self.assertEqual(description.count("• Data unavailable"), 3)
 
-    def test_embed_validation_rejects_oversized_field_before_delivery(self):
+    def test_embed_validation_rejects_oversized_description_before_delivery(self):
         payload = self.payload()
-        payload["embeds"][0]["fields"][0]["value"] = "x" * 1025
+        payload["embeds"][0]["description"] = "x" * 4097
 
-        with self.assertRaisesRegex(ValueError, "field value"):
+        with self.assertRaisesRegex(ValueError, "description"):
             market_wrap.send_market_wrap("destination", payload)
 
     def test_send_posts_exactly_one_safe_json_payload(self):
@@ -243,6 +268,10 @@ class MarketWrapTests(unittest.TestCase):
             return_value=self.cross_market,
         ), patch.object(
             market_wrap,
+            "get_global_market_snapshot",
+            return_value=self.global_markets,
+        ), patch.object(
+            market_wrap,
             "send_market_wrap",
         ) as send, redirect_stdout(StringIO()) as output:
             market_wrap.main(["--preview"])
@@ -284,6 +313,10 @@ class MarketWrapTests(unittest.TestCase):
             return_value=self.cross_market,
         ) as get_cross, patch.object(
             market_wrap,
+            "get_global_market_snapshot",
+            return_value=self.global_markets,
+        ) as get_global, patch.object(
+            market_wrap,
             "send_market_wrap",
         ) as send, redirect_stdout(StringIO()):
             market_wrap.main(["--post"])
@@ -292,6 +325,7 @@ class MarketWrapTests(unittest.TestCase):
         get_events.assert_called_once_with()
         get_crypto.assert_called_once_with()
         get_cross.assert_called_once_with()
+        get_global.assert_called_once_with()
         send.assert_called_once()
         self.assertEqual(send.call_args.args[0], "destination")
         self.assertEqual(len(send.call_args.args[1]["embeds"]), 1)
@@ -311,6 +345,62 @@ class MarketWrapTests(unittest.TestCase):
         )
         self.assertEqual([result["symbol"] for result in results], ["BTC", "ETH"])
         self.assertTrue(all(result["is_crypto"] for result in results))
+
+    def test_global_snapshot_fetches_each_named_index_once(self):
+        with patch.object(
+            market_wrap,
+            "get_yahoo_index_quote",
+            return_value=quote(100.0, 1.0),
+        ) as get_quote:
+            results = market_wrap.get_global_market_snapshot()
+
+        self.assertEqual(
+            [call.args[0] for call in get_quote.call_args_list],
+            [symbol for symbol, _ in market_wrap.GLOBAL_MARKET_SYMBOLS],
+        )
+        self.assertEqual(
+            [result["name"] for result in results],
+            [name for _, name in market_wrap.GLOBAL_MARKET_SYMBOLS],
+        )
+
+    def test_yahoo_index_quote_calculates_change_from_previous_close(self):
+        response = JsonResponse(
+            {
+                "chart": {
+                    "result": [
+                        {
+                            "meta": {
+                                "regularMarketPrice": 105.0,
+                                "chartPreviousClose": 100.0,
+                            },
+                            "indicators": {
+                                "quote": [{"close": [99.0, 100.0, 105.0]}]
+                            },
+                        }
+                    ]
+                }
+            }
+        )
+
+        with patch.object(
+            market_wrap.urllib.request,
+            "urlopen",
+            return_value=response,
+        ) as urlopen:
+            result = market_wrap.get_yahoo_index_quote("^N225")
+
+        self.assertEqual(result, {"price": 105.0, "percent_change": 5.0})
+        request = urlopen.call_args.args[0]
+        self.assertIn("%5EN225", request.full_url)
+        self.assertEqual(urlopen.call_args.kwargs, {"timeout": 30})
+
+    def test_yahoo_index_failure_returns_unavailable_without_aborting_wrap(self):
+        with patch.object(
+            market_wrap.urllib.request,
+            "urlopen",
+            side_effect=TimeoutError("synthetic timeout"),
+        ):
+            self.assertIsNone(market_wrap.get_yahoo_index_quote("^N225"))
 
     def test_modes_are_explicit_and_mutually_exclusive(self):
         with redirect_stderr(StringIO()):
