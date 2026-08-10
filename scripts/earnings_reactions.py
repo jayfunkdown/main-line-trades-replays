@@ -1824,8 +1824,6 @@ def build_signal_message(
 
     return "\n".join(
         [
-            DIVIDER,
-            "",
             "# 📈 Trade Signal",
             "",
             f"## {candidate['symbol']}",
@@ -1866,8 +1864,6 @@ def build_manual_signal_message(
 ) -> str:
     """Build the exact member-facing manual Signals message."""
     lines = [
-        DIVIDER,
-        "",
         "# 📈 Trade Signal",
         "",
         f"## {instrument.strip()}",
@@ -1893,6 +1889,20 @@ def build_manual_signal_message(
         ]
     )
     return "\n".join(lines)
+
+
+def build_bordered_discord_embed(
+    discord_module: Any,
+    description: str,
+    attachment_name: str,
+) -> Any:
+    """Build the branded Signals card used by drafts and publications."""
+    embed_data = bordered_embed(
+        description,
+        color=BRAND_NEON_PINK,
+        image_url=f"attachment://{attachment_name}",
+    )
+    return discord_module.Embed.from_dict(embed_data)
 
 
 def safe_manual_signal_log_value(value: Any, max_length: int = 80) -> str:
@@ -3205,9 +3215,8 @@ async def run_review_button_bot() -> None:
                 draft_channel = client.get_channel(drafts_channel_id)
                 if draft_channel is None:
                     draft_channel = await client.fetch_channel(drafts_channel_id)
-                draft_file = await attachment.to_file(
-                    filename=Path(attachment.filename).name
-                )
+                draft_filename = Path(attachment.filename).name
+                draft_file = await attachment.to_file(filename=draft_filename)
                 content = build_manual_signal_message(
                     instrument,
                     thesis,
@@ -3215,7 +3224,11 @@ async def run_review_button_bot() -> None:
                     setup_name=setup_name,
                 )
                 draft_message = await draft_channel.send(
-                    content=content,
+                    embed=build_bordered_discord_embed(
+                        discord,
+                        content,
+                        draft_filename,
+                    ),
                     file=draft_file,
                     view=ManualSignalDraftView(),
                     allowed_mentions=discord.AllowedMentions.none(),
@@ -3329,11 +3342,17 @@ async def run_review_button_bot() -> None:
             try:
                 if uploads:
                     replacement = uploads[0]
+                    replacement_filename = Path(replacement.filename).name
                     replacement_file = await replacement.to_file(
-                        filename=Path(replacement.filename).name
+                        filename=replacement_filename
                     )
                     updated_message = await draft_message.edit(
-                        content=content,
+                        content=None,
+                        embed=build_bordered_discord_embed(
+                            discord,
+                            content,
+                            replacement_filename,
+                        ),
                         attachments=[replacement_file],
                         view=ManualSignalDraftView(),
                         allowed_mentions=discord.AllowedMentions.none(),
@@ -3350,7 +3369,12 @@ async def run_review_button_bot() -> None:
                     chart = manual_chart_metadata(stored_replacement)
                 else:
                     await draft_message.edit(
-                        content=content,
+                        content=None,
+                        embed=build_bordered_discord_embed(
+                            discord,
+                            content,
+                            Path(record["chart"]["filename"]).name,
+                        ),
                         view=ManualSignalDraftView(),
                         allowed_mentions=discord.AllowedMentions.none(),
                     )
@@ -3508,8 +3532,9 @@ async def run_review_button_bot() -> None:
                         signals_channel = await client.fetch_channel(signals_channel_id)
                     if signals_channel is None:
                         raise DefiniteDeliveryError("Signals channel unavailable")
+                    chart_filename = Path(record["chart"]["filename"]).name
                     chart_file = await attachments[0].to_file(
-                        filename=Path(record["chart"]["filename"]).name
+                        filename=chart_filename
                     )
                 except asyncio.CancelledError:
                     state_persistence_failed = False
@@ -3539,7 +3564,11 @@ async def run_review_button_bot() -> None:
                     return
                 try:
                     signals_message = await signals_channel.send(
-                        content=content,
+                        embed=build_bordered_discord_embed(
+                            discord,
+                            content,
+                            chart_filename,
+                        ),
                         file=chart_file,
                         allowed_mentions=discord.AllowedMentions.none(),
                     )
@@ -4086,12 +4115,13 @@ async def run_review_button_bot() -> None:
                 return
 
             try:
+                signal_filename = (
+                    f"{candidate['symbol']}"
+                    "_trade_chart"
+                    f"{Path(attachment.filename).suffix or '.png'}"
+                )
                 signal_file = await attachment.to_file(
-                    filename=(
-                        f"{candidate['symbol']}"
-                        "_trade_chart"
-                        f"{Path(attachment.filename).suffix or '.png'}"
-                    )
+                    filename=signal_filename
                 )
                 signal_content = build_signal_message(
                     candidate,
@@ -4119,7 +4149,11 @@ async def run_review_button_bot() -> None:
 
             try:
                 signals_message = await signals_channel.send(
-                    content=signal_content,
+                    embed=build_bordered_discord_embed(
+                        discord,
+                        signal_content,
+                        signal_filename,
+                    ),
                     file=signal_file,
                     allowed_mentions=(
                         discord.AllowedMentions.none()
