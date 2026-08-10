@@ -902,6 +902,8 @@ def result_label(direction: str) -> str:
 
 def build_public_message(
     candidate: dict[str, Any],
+    *,
+    leading_divider: bool = True,
 ) -> str:
     report = candidate["report"]
     symbol = candidate["symbol"]
@@ -933,6 +935,7 @@ def build_public_message(
 
     return "\n".join(
         [
+            *([DIVIDER, ""] if leading_divider else []),
             "# 💰 Earnings Reaction",
             "",
             f"## {symbol}",
@@ -972,8 +975,7 @@ def build_public_message(
                 f"{reporting_session(report.get('hour'))}"
             ),
             "",
-            DIVIDER,
-            "",
+            *([] if leading_divider else [DIVIDER, ""]),
             "*Reported earnings data — not a trade signal.*",
         ]
     )
@@ -983,7 +985,10 @@ def build_private_message(
     candidate: dict[str, Any],
     rank: int,
 ) -> str:
-    public_message = build_public_message(candidate)
+    public_message = build_public_message(
+        candidate,
+        leading_divider=False,
+    )
 
     return "\n".join(
         [
