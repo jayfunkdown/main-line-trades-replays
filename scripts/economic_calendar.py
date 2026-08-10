@@ -11,6 +11,11 @@ import urllib.request
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+try:
+    from scripts.discord_embeds import bordered_webhook_payload
+except ModuleNotFoundError:
+    from discord_embeds import bordered_webhook_payload
+
 CALENDAR_URL = (
     "https://nfs.faireconomy.media/"
     "ff_calendar_thisweek.json"
@@ -132,11 +137,10 @@ def build_message(events):
 
 def post_to_discord(message):
     payload = json.dumps(
-        {
-            "username": "Main Line Trades Economic Calendar",
-            "content": message,
-            "allowed_mentions": {"parse": []},
-        }
+        bordered_webhook_payload(
+            "Main Line Trades Economic Calendar",
+            message,
+        )
     ).encode("utf-8")
 
     request = urllib.request.Request(

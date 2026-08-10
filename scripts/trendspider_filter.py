@@ -15,6 +15,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+
+try:
+    from scripts.discord_embeds import bordered_webhook_payload
+except ModuleNotFoundError:
+    from discord_embeds import bordered_webhook_payload
 from typing import Any
 
 
@@ -459,19 +464,12 @@ def post_to_public_channel(
     message_text: str,
     image_url: str,
 ) -> None:
-    payload = {
-        "username": "Main Line Trades Charts",
-        "content": message_text,
-        "embeds": [
-            {
-                "image": {
-                    "url": image_url,
-                }
-            }
-        ],
-        "allowed_mentions": {
-            "parse": [],
-        },
+    payload = bordered_webhook_payload(
+        "Main Line Trades Charts",
+        message_text,
+    )
+    payload["embeds"][0]["image"] = {
+        "url": image_url,
     }
 
     encoded_payload = json.dumps(
