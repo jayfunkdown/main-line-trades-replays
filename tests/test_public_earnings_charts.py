@@ -157,6 +157,35 @@ class PublicEarningsChartTests(unittest.TestCase):
         output_path.write_bytes(f"chart:{symbol}".encode("utf-8"))
         return output_path
 
+    def test_public_divider_leads_the_next_reaction(self):
+        message = earnings_reactions.build_public_message(self.candidate())
+
+        self.assertTrue(
+            message.startswith(
+                f"{earnings_reactions.DIVIDER}\n\n# "
+            )
+        )
+        self.assertEqual(message.count(earnings_reactions.DIVIDER), 1)
+        self.assertLess(
+            message.index("**Session:**"),
+            message.index("*Reported earnings data"),
+        )
+
+    def test_private_divider_keeps_its_existing_position(self):
+        message = earnings_reactions.build_private_message(
+            self.candidate(),
+            1,
+        )
+
+        self.assertFalse(message.startswith(earnings_reactions.DIVIDER))
+        self.assertIn(
+            (
+                f"\n\n{earnings_reactions.DIVIDER}\n\n"
+                "*Reported earnings data"
+            ),
+            message,
+        )
+
     def test_selection_ranking_content_and_private_delivery_are_unchanged(self):
         low = self.candidate("LOW", score=90.0)
         excluded = self.candidate("EXCLUDED", score=200.0, public=False)
