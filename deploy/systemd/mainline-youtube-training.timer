@@ -1,0 +1,10 @@
+[Unit]
+Description=Check Main Line Trades YouTube Training Playlist Every 30 Minutes
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=30min
+Unit=mainline-youtube-training.service
+
+[Install]
+WantedBy=timers.target

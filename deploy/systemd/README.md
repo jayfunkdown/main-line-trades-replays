@@ -16,6 +16,7 @@ sudo systemctl enable --now \
   mainline-trendspider.timer \
   mainline-trump-filter.timer \
   mainline-weekly-calendar.timer \
+  mainline-youtube-training.timer \
   mainline-youtube-replays.timer
 ```
 

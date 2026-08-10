@@ -6,3 +6,4 @@ __pycache__/
 *.pyc
 *.egg-info/
 data/earnings_reactions_state.lock
+data/training_posted_ids.json

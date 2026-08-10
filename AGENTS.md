@@ -208,6 +208,24 @@ Processed state:
 
 Historical replay IDs were deliberately seeded before enabling production.
 
+## YouTube Training Videos
+
+    scripts/replay_to_discord.py --post --feed training
+
+Watches the configured Main Line Trades training playlist and posts newly added
+tutorials with the same bordered-card presentation as replay notifications.
+
+Production polling:
+
+    Every 30 minutes
+
+Processed state:
+
+    data/training_posted_ids.json
+
+The initial playlist import is explicit and uses `--import-existing`; normal
+timer runs never backfill an empty state.
+
 ---
 
 # 4. Production Services and Timers
@@ -237,6 +255,9 @@ Scheduled units:
 
     mainline-youtube-replays.service
     mainline-youtube-replays.timer
+
+    mainline-youtube-training.service
+    mainline-youtube-training.timer
 
 Copies of these production units are stored in:
 
@@ -326,6 +347,7 @@ These files are production runtime state:
     data/trendspider_processed.json
     data/trump_processed.json
     data/posted_ids.json
+    data/training_posted_ids.json
 
 Generated earnings charts are also runtime output:
 
