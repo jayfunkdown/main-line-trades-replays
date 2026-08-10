@@ -76,12 +76,22 @@ class MarketWrapTests(unittest.TestCase):
             item("USO", "Oil ETF", 80.0, -0.5),
             item("UUP", "U.S. Dollar ETF", 30.0, 0.1),
         ]
+        self.economic_events = [
+            {
+                "title": "CPI m/m",
+                "time": datetime(2026, 8, 10, 8, 30),
+                "actual": "0.2%",
+                "forecast": "0.3%",
+                "previous": "0.1%",
+            }
+        ]
 
     def payload(self):
         return market_wrap.build_market_wrap_payload(
             self.market,
             self.crypto,
             self.cross_market,
+            self.economic_events,
             now=datetime(2026, 8, 10, 16, 15),
         )
 
@@ -98,6 +108,7 @@ class MarketWrapTests(unittest.TestCase):
             [field["name"] for field in embed["fields"]],
             [
                 "📈 U.S. Market Close",
+                "📅 High-Impact Economic Results",
                 "₿ Crypto Snapshot",
                 "🌐 Key Markets",
                 "🧠 Session Read",
@@ -105,8 +116,44 @@ class MarketWrapTests(unittest.TestCase):
             ],
         )
         self.assertIn("**SPY — S&P 500 ETF:** $700.00 (+1.00%)", embed["fields"][0]["value"])
-        self.assertIn("**BTC — Bitcoin:** $100,000 (+2.50%)", embed["fields"][1]["value"])
-        self.assertIn("**GLD — Gold ETF:** $300.00 (+0.80%)", embed["fields"][2]["value"])
+        self.assertIn("**8:30 AM — CPI m/m**", embed["fields"][1]["value"])
+        self.assertIn("Actual: **0.2%**", embed["fields"][1]["value"])
+        self.assertIn("Forecast: **0.3%**", embed["fields"][1]["value"])
+        self.assertIn("Previous: **0.1%**", embed["fields"][1]["value"])
+        self.assertIn("**BTC — Bitcoin:** $100,000 (+2.50%)", embed["fields"][2]["value"])
+        self.assertIn("**GLD — Gold ETF:** $300.00 (+0.80%)", embed["fields"][3]["value"])
+
+    def test_quiet_day_omits_economic_results_section(self):
+        payload = market_wrap.build_market_wrap_payload(
+            self.market,
+            self.crypto,
+            self.cross_market,
+            [],
+            now=datetime(2026, 8, 10, 16, 15),
+        )
+
+        field_names = [
+            field["name"]
+            for field in payload["embeds"][0]["fields"]
+        ]
+        self.assertNotIn("📅 High-Impact Economic Results", field_names)
+
+    def test_economic_results_are_capped_with_omission_count(self):
+        events = [
+            {
+                "title": f"Long Economic Event {index} " + ("x" * 250),
+                "time": datetime(2026, 8, 10, 8, 30),
+                "actual": "1.0%",
+                "forecast": "0.9%",
+                "previous": "0.8%",
+            }
+            for index in range(10)
+        ]
+
+        result = market_wrap.economic_results_block(events)
+
+        self.assertLessEqual(len(result), 1024)
+        self.assertIn("additional high-impact event(s)", result)
 
     def test_session_read_is_deterministic(self):
         self.assertEqual(
@@ -182,6 +229,10 @@ class MarketWrapTests(unittest.TestCase):
             "get_market_snapshot",
             return_value=self.market,
         ), patch.object(
+            market_wrap.morning_brief,
+            "get_high_impact_usd_events",
+            return_value=[],
+        ), patch.object(
             market_wrap,
             "get_crypto_snapshot",
             return_value=self.crypto,
@@ -219,6 +270,10 @@ class MarketWrapTests(unittest.TestCase):
             "get_market_snapshot",
             return_value=self.market,
         ) as get_market, patch.object(
+            market_wrap.morning_brief,
+            "get_high_impact_usd_events",
+            return_value=self.economic_events,
+        ) as get_events, patch.object(
             market_wrap,
             "get_crypto_snapshot",
             return_value=self.crypto,
@@ -233,6 +288,7 @@ class MarketWrapTests(unittest.TestCase):
             market_wrap.main(["--post"])
 
         get_market.assert_called_once_with()
+        get_events.assert_called_once_with()
         get_crypto.assert_called_once_with()
         get_cross.assert_called_once_with()
         send.assert_called_once()
