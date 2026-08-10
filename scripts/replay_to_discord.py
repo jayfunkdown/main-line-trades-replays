@@ -16,6 +16,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+try:
+    from scripts.discord_embeds import BRAND_ELECTRIC_BLUE
+except ModuleNotFoundError:
+    from discord_embeds import BRAND_ELECTRIC_BLUE
+
 
 # ============================================================
 # Configuration
@@ -38,7 +43,7 @@ MAX_DISCORD_ATTEMPTS = 4
 POST_DELAY_SECONDS = 2.0
 
 # Exact Discord embed appearance from the approved screenshot.
-EMBED_COLOR = 0x5865F2
+EMBED_COLOR = BRAND_ELECTRIC_BLUE
 WEBHOOK_USERNAME = "Main Line Trades Replays"
 EMBED_AUTHOR = "Main Line Trades"
 EMBED_DESCRIPTION = (

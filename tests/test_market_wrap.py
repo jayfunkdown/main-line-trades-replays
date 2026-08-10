@@ -103,6 +103,7 @@ class MarketWrapTests(unittest.TestCase):
         self.assertEqual(len(payload["embeds"]), 1)
 
         embed = payload["embeds"][0]
+        self.assertEqual(embed["color"], 0x00CFFF)
         self.assertIn("Monday, August 10, 2026", embed["description"])
         self.assertEqual(
             [field["name"] for field in embed["fields"]],

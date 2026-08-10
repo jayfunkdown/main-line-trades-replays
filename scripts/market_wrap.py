@@ -17,6 +17,11 @@ try:
 except ModuleNotFoundError:
     import morning_brief
 
+try:
+    from scripts.discord_embeds import BRAND_ELECTRIC_BLUE
+except ModuleNotFoundError:
+    from discord_embeds import BRAND_ELECTRIC_BLUE
+
 
 MARKET_WRAP_WEBHOOK_USERNAME = "Main Line Trades Market Wrap"
 USER_AGENT = "MainLineTrades-MarketWrap/1.0"
@@ -157,20 +162,7 @@ def economic_results_block(events, limit=DISCORD_EMBED_FIELD_VALUE_LIMIT):
 
 
 def market_wrap_color(market_snapshot):
-    changes = available_changes(market_snapshot)
-
-    if not changes:
-        return 0x5865F2
-
-    average_change = sum(changes) / len(changes)
-
-    if average_change > 0:
-        return 0x57F287
-
-    if average_change < 0:
-        return 0xED4245
-
-    return 0xFEE75C
+    return BRAND_ELECTRIC_BLUE
 
 
 def build_market_wrap_payload(

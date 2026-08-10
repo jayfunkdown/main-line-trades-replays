@@ -55,7 +55,7 @@ class BorderedCalendarPostTests(unittest.TestCase):
             payload["embeds"][0]["description"],
             "# Calendar\nCalendar details",
         )
-        self.assertEqual(payload["embeds"][0]["color"], 0x5865F2)
+        self.assertEqual(payload["embeds"][0]["color"], 0x00CFFF)
         urlopen.assert_called_once()
 
     def test_daily_calendar_uses_bordered_embed(self):

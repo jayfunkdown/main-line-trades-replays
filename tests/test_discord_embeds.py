@@ -1,6 +1,10 @@
 import unittest
 
-from scripts.discord_embeds import bordered_webhook_payload
+from scripts.discord_embeds import (
+    BRAND_ELECTRIC_BLUE,
+    BRAND_NEON_PINK,
+    bordered_webhook_payload,
+)
 
 
 class DiscordEmbedTests(unittest.TestCase):
@@ -18,7 +22,7 @@ class DiscordEmbedTests(unittest.TestCase):
             [
                 {
                     "description": "# Heading\nUseful content",
-                    "color": 0x5865F2,
+                    "color": BRAND_ELECTRIC_BLUE,
                 }
             ],
         )
@@ -49,6 +53,10 @@ class DiscordEmbedTests(unittest.TestCase):
                         "content",
                         color=color,
                     )
+
+    def test_brand_palette_is_stable(self):
+        self.assertEqual(BRAND_ELECTRIC_BLUE, 0x00CFFF)
+        self.assertEqual(BRAND_NEON_PINK, 0xFF2BD6)
 
 
 if __name__ == "__main__":
