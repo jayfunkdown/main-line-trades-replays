@@ -5,6 +5,11 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 try:
+    from scripts.discord_embeds import bordered_webhook_payload
+except ModuleNotFoundError:
+    from discord_embeds import bordered_webhook_payload
+
+try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
@@ -285,13 +290,10 @@ def post_to_discord(message):
         )
 
     payload = json.dumps(
-        {
-            "username": "Main Line Trades Economic Calendar",
-            "content": message,
-            "allowed_mentions": {
-                "parse": []
-            },
-        }
+        bordered_webhook_payload(
+            "Main Line Trades Economic Calendar",
+            message,
+        )
     ).encode("utf-8")
 
     request = urllib.request.Request(

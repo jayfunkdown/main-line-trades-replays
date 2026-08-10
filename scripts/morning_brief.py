@@ -15,6 +15,11 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+try:
+    from scripts.discord_embeds import bordered_webhook_payload
+except ModuleNotFoundError:
+    from discord_embeds import bordered_webhook_payload
+
 
 # ============================================================
 # Configuration
@@ -1137,13 +1142,10 @@ def send_webhook_message(
         )
 
     payload = json.dumps(
-        {
-            "username": username,
-            "content": message,
-            "allowed_mentions": {
-                "parse": [],
-            },
-        }
+        bordered_webhook_payload(
+            username,
+            message,
+        )
     ).encode("utf-8")
 
     request = urllib.request.Request(
