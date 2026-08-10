@@ -113,7 +113,7 @@ Posts the weekday Morning Brief.
 Production schedule:
 
     Monday-Friday
-    6:30 AM America/New_York
+    6:05 AM America/New_York
 
 ---
 
@@ -278,7 +278,10 @@ Do not remove or change this without addressing the underlying date-selection be
 
 Monday-Friday:
 
-    6:30 AM America/New_York
+    6:05 AM America/New_York
+
+This is intentionally staggered five minutes after the 6:00 AM earnings and
+weekly-calendar jobs to avoid concurrent API work.
 
 ---
 
