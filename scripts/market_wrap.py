@@ -108,6 +108,54 @@ def quote_block(items):
     ) or "• Data unavailable"
 
 
+def economic_results_block(events, limit=DISCORD_EMBED_FIELD_VALUE_LIMIT):
+    entries = []
+
+    for event in events:
+        event_time = event.get("time")
+        time_label = (
+            morning_brief.format_eastern_time(event_time)
+            if isinstance(event_time, datetime)
+            else "Time unavailable"
+        )
+        title = str(event.get("title") or "Unknown Event")
+        actual = str(event.get("actual") or "Not released")
+        forecast = str(event.get("forecast") or "Not listed")
+        previous = str(event.get("previous") or "Not listed")
+        entries.append(
+            f"**{time_label} — {title}**\n"
+            f"Actual: **{actual}** | Forecast: **{forecast}** | "
+            f"Previous: **{previous}**"
+        )
+
+    included = []
+
+    for index, entry in enumerate(entries):
+        omitted_count = len(entries) - index - 1
+        candidate_entries = [*included, entry]
+        candidate = "\n\n".join(candidate_entries)
+
+        if omitted_count:
+            candidate += f"\n\n*Plus {omitted_count} additional high-impact event(s).*"
+
+        if len(candidate) > limit:
+            break
+
+        included.append(entry)
+
+    omitted_count = len(entries) - len(included)
+    result = "\n\n".join(included)
+
+    if omitted_count:
+        omitted_line = f"*Plus {omitted_count} additional high-impact event(s).*"
+        result = f"{result}\n\n{omitted_line}" if result else omitted_line
+
+    if len(result) > limit:
+        return result[: limit - 1].rstrip() + "…"
+
+    return result
+
+
 def market_wrap_color(market_snapshot):
     changes = available_changes(market_snapshot)
 
@@ -129,11 +177,56 @@ def build_market_wrap_payload(
     market_snapshot,
     crypto_snapshot,
     cross_market_snapshot,
+    economic_events=None,
     *,
     now=None,
 ):
     current_time = now or datetime.now(morning_brief.EASTERN)
     date_label = current_time.strftime("%A, %B %d, %Y")
+
+    fields = [
+        {
+            "name": "📈 U.S. Market Close",
+            "value": quote_block(market_snapshot),
+            "inline": False,
+        },
+    ]
+
+    if economic_events:
+        fields.append(
+            {
+                "name": "📅 High-Impact Economic Results",
+                "value": economic_results_block(economic_events),
+                "inline": False,
+            }
+        )
+
+    fields.extend(
+        [
+            {
+                "name": "₿ Crypto Snapshot",
+                "value": quote_block(crypto_snapshot),
+                "inline": False,
+            },
+            {
+                "name": "🌐 Key Markets",
+                "value": quote_block(cross_market_snapshot),
+                "inline": False,
+            },
+            {
+                "name": "🧠 Session Read",
+                "value": session_read(market_snapshot),
+                "inline": False,
+            },
+            {
+                "name": "🔭 Next Session",
+                "value": (
+                    "Review tomorrow’s Morning Brief and calendars before the next session."
+                ),
+                "inline": False,
+            },
+        ]
+    )
 
     payload = {
         "username": MARKET_WRAP_WEBHOOK_USERNAME,
@@ -146,35 +239,7 @@ def build_market_wrap_payload(
                     "The closing snapshot for U.S. markets, crypto, and key cross-market signals."
                 ),
                 "color": market_wrap_color(market_snapshot),
-                "fields": [
-                    {
-                        "name": "📈 U.S. Market Close",
-                        "value": quote_block(market_snapshot),
-                        "inline": False,
-                    },
-                    {
-                        "name": "₿ Crypto Snapshot",
-                        "value": quote_block(crypto_snapshot),
-                        "inline": False,
-                    },
-                    {
-                        "name": "🌐 Key Markets",
-                        "value": quote_block(cross_market_snapshot),
-                        "inline": False,
-                    },
-                    {
-                        "name": "🧠 Session Read",
-                        "value": session_read(market_snapshot),
-                        "inline": False,
-                    },
-                    {
-                        "name": "🔭 Next Session",
-                        "value": (
-                            "Review tomorrow’s Morning Brief and calendars before the next session."
-                        ),
-                        "inline": False,
-                    },
-                ],
+                "fields": fields,
                 "footer": {
                     "text": "Market data is informational and may be delayed. Not financial advice."
                 },
@@ -293,12 +358,14 @@ def main(argv=None):
     webhook_url = required_webhook() if args.post else None
 
     market_snapshot = morning_brief.get_market_snapshot()
+    economic_events = morning_brief.get_high_impact_usd_events()
     crypto_snapshot = get_crypto_snapshot()
     cross_market_snapshot = get_cross_market_snapshot()
     payload = build_market_wrap_payload(
         market_snapshot,
         crypto_snapshot,
         cross_market_snapshot,
+        economic_events,
     )
 
     if args.preview:

@@ -453,6 +453,10 @@ def get_high_impact_usd_events():
                     event.get("forecast")
                     or "Not listed"
                 ),
+                "actual": (
+                    event.get("actual")
+                    or "Not released"
+                ),
                 "previous": (
                     event.get("previous")
                     or "Not listed"
