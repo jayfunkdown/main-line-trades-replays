@@ -72,12 +72,13 @@ class ManualSignalPureBehaviorTests(unittest.TestCase):
                 timeframe="15m",
                 setup_name="Opening drive",
             ),
+            f"{earnings_reactions.DIVIDER}\n\n"
             "# 📈 Trade Signal\n\n"
             "## ES futures\n\n"
             "🕒 **Timeframe:** 15m\n"
             "🎯 **Setup:** Opening drive\n\n"
             "## 🧠 Trade Thesis\n\n"
-            f"Hold above VWAP.\n\n{earnings_reactions.DIVIDER}\n\n"
+            "Hold above VWAP.\n\n"
             "## 📊 Trade Chart\n\n"
             "*Chart and thesis provided by Main Line Trades.*\n\n"
             "⚠️ **Manage risk. This is not financial advice.**",

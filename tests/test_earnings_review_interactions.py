@@ -54,6 +54,51 @@ class ConcurrentAttachmentBarrier:
         return f"synthetic-discord-file:{filename}"
 
 
+class EarningsSignalMessageFormattingTests(unittest.TestCase):
+    @staticmethod
+    def candidate():
+        return {
+            "symbol": "PAA",
+            "move_percent": -3.02,
+            "current_price": 22.81,
+            "eps_surprise": 12.9,
+            "revenue_surprise": 40.2,
+            "eps_direction": "beat",
+            "revenue_direction": "beat",
+        }
+
+    def test_signal_divider_leads_the_next_trade_signal(self):
+        message = earnings_reactions.build_signal_message(
+            self.candidate(),
+            "Weekly continuation coming up",
+        )
+
+        self.assertTrue(
+            message.startswith(
+                f"{earnings_reactions.DIVIDER}\n\n# 📈 Trade Signal"
+            )
+        )
+        self.assertEqual(message.count(earnings_reactions.DIVIDER), 1)
+
+    def test_signal_divider_is_not_clumped_above_the_chart(self):
+        message = earnings_reactions.build_signal_message(
+            self.candidate(),
+            "Weekly continuation coming up",
+        )
+
+        self.assertIn(
+            "Weekly continuation coming up\n\n📊 **Trade Chart**",
+            message,
+        )
+        self.assertNotIn(
+            (
+                "Weekly continuation coming up\n\n"
+                f"{earnings_reactions.DIVIDER}\n\n📊 **Trade Chart**"
+            ),
+            message,
+        )
+
+
 class EarningsReviewInteractionAuthorizationTests(
     unittest.IsolatedAsyncioTestCase
 ):

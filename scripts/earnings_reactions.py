@@ -1818,6 +1818,8 @@ def build_signal_message(
 
     return "\n".join(
         [
+            DIVIDER,
+            "",
             "# 📈 Trade Signal",
             "",
             f"## {candidate['symbol']}",
@@ -1840,8 +1842,6 @@ def build_signal_message(
             "",
             trade_thesis.strip(),
             "",
-            DIVIDER,
-            "",
             "📊 **Trade Chart**",
             "",
             "*Chart and thesis provided by Main Line Trades.*",
@@ -1860,6 +1860,8 @@ def build_manual_signal_message(
 ) -> str:
     """Build the exact member-facing manual Signals message."""
     lines = [
+        DIVIDER,
+        "",
         "# 📈 Trade Signal",
         "",
         f"## {instrument.strip()}",
@@ -1876,8 +1878,6 @@ def build_manual_signal_message(
             "## 🧠 Trade Thesis",
             "",
             trade_thesis.strip(),
-            "",
-            DIVIDER,
             "",
             "## 📊 Trade Chart",
             "",
