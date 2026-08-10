@@ -437,7 +437,12 @@ class ConfigurationAndMessageBoundaryTests(NoNetworkTestCase):
 
                 request = urlopen.call_args.args[0]
                 payload = json.loads(request.data.decode("utf-8"))
-                self.assertEqual(len(payload["content"]), length)
+                self.assertNotIn("content", payload)
+                self.assertEqual(
+                    len(payload["embeds"][0]["description"]),
+                    length,
+                )
+                self.assertEqual(payload["embeds"][0]["color"], 0xFF2BD6)
 
 
 class ReviewModalBoundaryTests(unittest.IsolatedAsyncioTestCase):

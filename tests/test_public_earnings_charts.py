@@ -157,33 +157,85 @@ class PublicEarningsChartTests(unittest.TestCase):
         output_path.write_bytes(f"chart:{symbol}".encode("utf-8"))
         return output_path
 
-    def test_public_divider_leads_the_next_reaction(self):
+    def test_public_message_relies_on_the_embed_border(self):
         message = earnings_reactions.build_public_message(self.candidate())
 
-        self.assertTrue(
-            message.startswith(
-                f"{earnings_reactions.DIVIDER}\n\n# "
-            )
-        )
-        self.assertEqual(message.count(earnings_reactions.DIVIDER), 1)
+        self.assertTrue(message.startswith("# "))
+        self.assertNotIn(earnings_reactions.DIVIDER, message)
         self.assertLess(
             message.index("**Session:**"),
             message.index("*Reported earnings data"),
         )
 
-    def test_private_divider_keeps_its_existing_position(self):
+    def test_private_message_relies_on_the_embed_border(self):
         message = earnings_reactions.build_private_message(
             self.candidate(),
             1,
         )
 
-        self.assertFalse(message.startswith(earnings_reactions.DIVIDER))
-        self.assertIn(
-            (
-                f"\n\n{earnings_reactions.DIVIDER}\n\n"
-                "*Reported earnings data"
-            ),
-            message,
+        self.assertNotIn(earnings_reactions.DIVIDER, message)
+
+    def test_private_review_places_message_and_chart_in_one_bordered_embed(self):
+        candidate = self.candidate()
+        state = self.empty_state()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            chart_path = Path(temp_dir) / "ACME_weekly.png"
+            chart_path.write_bytes(b"chart")
+            captured_payload = {}
+
+            def capture_multipart(*, payload, file_path, file_name=None):
+                captured_payload.update(copy.deepcopy(payload))
+                return b"multipart", "synthetic-boundary"
+
+            with patch.object(
+                earnings_reactions,
+                "required_env",
+                return_value="synthetic-value",
+            ), patch.object(
+                earnings_reactions,
+                "resolve_webhook_channel_id",
+                return_value="review-channel",
+            ), patch.object(
+                earnings_reactions,
+                "generate_weekly_chart",
+                return_value=chart_path,
+            ), patch.object(
+                earnings_reactions,
+                "multipart_body",
+                side_effect=capture_multipart,
+            ), patch.object(
+                earnings_reactions.urllib.request,
+                "urlopen",
+                return_value=FakeResponse(b'{"id":"review-message"}'),
+            ), patch.object(
+                earnings_reactions,
+                "set_state_record",
+                return_value=state,
+            ):
+                message_id = earnings_reactions.send_private_review_with_chart(
+                    candidate,
+                    1,
+                    state,
+                )
+
+        self.assertEqual(message_id, "review-message")
+        self.assertNotIn("content", captured_payload)
+        self.assertEqual(
+            captured_payload["embeds"],
+            [
+                {
+                    "description": earnings_reactions.build_private_message(
+                        candidate,
+                        1,
+                    ),
+                    "color": 0xFF2BD6,
+                    "image": {"url": "attachment://ACME_weekly.png"},
+                }
+            ],
+        )
+        self.assertEqual(
+            captured_payload["attachments"][0]["filename"],
+            "ACME_weekly.png",
         )
 
     def test_selection_ranking_content_and_private_delivery_are_unchanged(self):
@@ -288,7 +340,17 @@ class PublicEarningsChartTests(unittest.TestCase):
         self.assertEqual(message_id, "public-message")
         generate.assert_called_once_with("ACME", output_path=chart_path)
         self.assertTrue(content_type.startswith("multipart/form-data; boundary="))
-        self.assertEqual(payload["content"], message)
+        self.assertNotIn("content", payload)
+        self.assertEqual(
+            payload["embeds"],
+            [
+                {
+                    "description": message,
+                    "color": 0xFF2BD6,
+                    "image": {"url": "attachment://ACME_weekly.png"},
+                }
+            ],
+        )
         self.assertEqual(payload["allowed_mentions"], {"parse": []})
         self.assertEqual(payload["attachments"][0]["filename"], "ACME_weekly.png")
         self.assertIn(b"chart:ACME", body)

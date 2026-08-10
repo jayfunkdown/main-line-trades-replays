@@ -83,6 +83,11 @@ try:
 except ImportError:
     from earnings_state import EarningsStateError, EarningsStateStore
 
+try:
+    from .discord_embeds import BRAND_NEON_PINK, bordered_embed
+except ImportError:
+    from discord_embeds import BRAND_NEON_PINK, bordered_embed
+
 
 FINNHUB_BASE_URL = "https://finnhub.io/api/v1"
 EASTERN = ZoneInfo("America/New_York")
@@ -903,7 +908,7 @@ def result_label(direction: str) -> str:
 def build_public_message(
     candidate: dict[str, Any],
     *,
-    leading_divider: bool = True,
+    leading_divider: bool = False,
 ) -> str:
     report = candidate["report"]
     symbol = candidate["symbol"]
@@ -975,7 +980,6 @@ def build_public_message(
                 f"{reporting_session(report.get('hour'))}"
             ),
             "",
-            *([] if leading_divider else [DIVIDER, ""]),
             "*Reported earnings data — not a trade signal.*",
         ]
     )
@@ -1543,17 +1547,19 @@ def send_private_review_with_chart(
         candidate
     )
 
+    attachment_name = chart_path.name
     payload = {
-        "content": build_private_message(
-            candidate,
-            rank,
-        ),
+        "embeds": [
+            bordered_embed(
+                build_private_message(candidate, rank),
+                color=BRAND_NEON_PINK,
+                image_url=f"attachment://{attachment_name}",
+            )
+        ],
         "attachments": [
             {
                 "id": 0,
-                "filename": (
-                    chart_path.name
-                ),
+                "filename": attachment_name,
                 "description": (
                     f"{candidate['symbol']} "
                     "weekly chart"
@@ -4569,7 +4575,12 @@ def send_discord_message(
 ) -> str | None:
     payload_data = {
         "username": username,
-        "content": message,
+        "embeds": [
+            bordered_embed(
+                message,
+                color=BRAND_NEON_PINK,
+            )
+        ],
         "allowed_mentions": {"parse": []},
     }
     chart_path: Path | None = None
@@ -4586,6 +4597,9 @@ def send_discord_message(
                     output_path=chart_path,
                 )
                 attachment_name = weekly_chart_filename(chart_symbol)
+                payload_data["embeds"][0]["image"] = {
+                    "url": f"attachment://{attachment_name}",
+                }
                 payload_data["attachments"] = [
                     {
                         "id": 0,
