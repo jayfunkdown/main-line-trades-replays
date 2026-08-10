@@ -7,11 +7,11 @@ BRAND_NEON_PINK = 0xFF2BD6
 DEFAULT_EMBED_COLOR = BRAND_ELECTRIC_BLUE
 
 
-def bordered_webhook_payload(
-    username,
+def bordered_embed(
     description,
     *,
     color=DEFAULT_EMBED_COLOR,
+    image_url=None,
 ):
     if not isinstance(description, str) or not description.strip():
         raise ValueError("Discord embed description must be nonempty.")
@@ -26,13 +26,27 @@ def bordered_webhook_payload(
     ):
         raise ValueError("Discord embed color is invalid.")
 
+    embed = {
+        "description": description,
+        "color": color,
+    }
+    if image_url is not None:
+        if not isinstance(image_url, str) or not image_url.strip():
+            raise ValueError("Discord embed image URL must be nonempty.")
+        embed["image"] = {"url": image_url}
+    return embed
+
+
+def bordered_webhook_payload(
+    username,
+    description,
+    *,
+    color=DEFAULT_EMBED_COLOR,
+):
     return {
         "username": username,
         "allowed_mentions": {"parse": []},
         "embeds": [
-            {
-                "description": description,
-                "color": color,
-            }
+            bordered_embed(description, color=color)
         ],
     }

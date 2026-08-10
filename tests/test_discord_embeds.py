@@ -3,11 +3,28 @@ import unittest
 from scripts.discord_embeds import (
     BRAND_ELECTRIC_BLUE,
     BRAND_NEON_PINK,
+    bordered_embed,
     bordered_webhook_payload,
 )
 
 
 class DiscordEmbedTests(unittest.TestCase):
+    def test_builds_reusable_embed_with_attachment_image(self):
+        embed = bordered_embed(
+            "A bordered post",
+            color=BRAND_NEON_PINK,
+            image_url="attachment://chart.png",
+        )
+
+        self.assertEqual(
+            embed,
+            {
+                "description": "A bordered post",
+                "color": 0xFF2BD6,
+                "image": {"url": "attachment://chart.png"},
+            },
+        )
+
     def test_builds_one_bordered_embed_with_mentions_disabled(self):
         payload = bordered_webhook_payload(
             "Main Line Trades",
