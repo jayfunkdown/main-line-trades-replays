@@ -82,5 +82,71 @@ class OversizedMessageTests(unittest.TestCase):
             self.assertIn("oversized item(s)", output.getvalue())
 
 
+class BorderedPublicPayloadTests(unittest.TestCase):
+    def test_text_uses_one_bordered_embed(self):
+        payload = trump_filter.build_public_payload(
+            "👤 **Truth Social**\n\nMarket update",
+            [],
+        )
+
+        self.assertNotIn("content", payload)
+        self.assertEqual(payload["username"], "Main Line Trades Truth Social")
+        self.assertEqual(payload["allowed_mentions"], {"parse": []})
+        self.assertEqual(
+            payload["embeds"],
+            [
+                {
+                    "description": "👤 **Truth Social**\n\nMarket update",
+                    "color": 0x00CFFF,
+                }
+            ],
+        )
+
+    def test_first_image_shares_the_text_card(self):
+        payload = trump_filter.build_public_payload(
+            "Truth Social post",
+            [
+                "https://example.com/one.png",
+                "https://example.com/two.png",
+            ],
+        )
+
+        self.assertEqual(len(payload["embeds"]), 2)
+        self.assertEqual(
+            payload["embeds"][0],
+            {
+                "description": "Truth Social post",
+                "color": 0x00CFFF,
+                "image": {
+                    "url": "https://example.com/one.png",
+                },
+            },
+        )
+        self.assertEqual(
+            payload["embeds"][1],
+            {
+                "color": 0x00CFFF,
+                "image": {
+                    "url": "https://example.com/two.png",
+                },
+            },
+        )
+
+    def test_image_count_remains_capped_at_ten(self):
+        payload = trump_filter.build_public_payload(
+            "Truth Social post",
+            [
+                f"https://example.com/{index}.png"
+                for index in range(12)
+            ],
+        )
+
+        self.assertEqual(len(payload["embeds"]), 10)
+        self.assertEqual(
+            payload["embeds"][-1]["image"]["url"],
+            "https://example.com/9.png",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

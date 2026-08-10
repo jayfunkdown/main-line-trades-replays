@@ -17,6 +17,11 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+try:
+    from scripts.discord_embeds import BRAND_ELECTRIC_BLUE
+except ModuleNotFoundError:
+    from discord_embeds import BRAND_ELECTRIC_BLUE
+
 
 DISCORD_API = "https://discord.com/api/v10"
 USER_AGENT = "MainLineTrades-TruthSocialFilter/1.1"
@@ -495,28 +500,53 @@ def _retry_after_seconds(
     return float(2 ** attempt)
 
 
-def post_to_public_channel(
-    webhook_url: str,
+def build_public_payload(
     message_text: str,
     image_urls: list[str],
-) -> None:
+) -> dict[str, Any]:
+    selected_images = image_urls[:10]
+    primary_embed: dict[str, Any] = {
+        "description": message_text,
+        "color": BRAND_ELECTRIC_BLUE,
+    }
+
+    if selected_images:
+        primary_embed["image"] = {
+            "url": selected_images[0],
+        }
+
     payload: dict[str, Any] = {
         "username": "Main Line Trades Truth Social",
-        "content": message_text,
+        "embeds": [primary_embed],
         "allowed_mentions": {
             "parse": [],
         },
     }
 
-    if image_urls:
-        payload["embeds"] = [
+    payload["embeds"].extend(
+        [
             {
+                "color": BRAND_ELECTRIC_BLUE,
                 "image": {
                     "url": image_url,
                 }
             }
-            for image_url in image_urls[:10]
+            for image_url in selected_images[1:]
         ]
+    )
+
+    return payload
+
+
+def post_to_public_channel(
+    webhook_url: str,
+    message_text: str,
+    image_urls: list[str],
+) -> None:
+    payload = build_public_payload(
+        message_text,
+        image_urls,
+    )
 
     encoded_payload = json.dumps(
         payload
