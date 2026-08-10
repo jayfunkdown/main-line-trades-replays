@@ -64,6 +64,7 @@ class MorningBriefRoutingTests(unittest.TestCase):
             }
         ]
         market_snapshot = []
+        global_markets = []
         key_markets = []
 
         with patch.dict(os.environ, self.environment(), clear=True), patch.object(
@@ -79,6 +80,10 @@ class MorningBriefRoutingTests(unittest.TestCase):
             "get_market_snapshot",
             return_value=market_snapshot,
         ) as get_market, patch.object(
+            morning_brief,
+            "get_global_market_snapshot",
+            return_value=global_markets,
+        ) as get_global_markets, patch.object(
             morning_brief,
             "get_key_markets",
             return_value=key_markets,
@@ -102,8 +107,14 @@ class MorningBriefRoutingTests(unittest.TestCase):
         get_events.assert_called_once_with()
         get_earnings.assert_called_once_with()
         get_market.assert_called_once_with()
+        get_global_markets.assert_called_once_with()
         get_key_markets.assert_called_once_with()
-        build_market.assert_called_once_with(events, market_snapshot, key_markets)
+        build_market.assert_called_once_with(
+            events,
+            market_snapshot,
+            global_markets,
+            key_markets,
+        )
         build_earnings.assert_called_once_with(earnings)
         send.assert_has_calls(
             [
@@ -228,6 +239,9 @@ class MorningBriefRoutingTests(unittest.TestCase):
                 "get_market_snapshot",
             ) as get_market, patch.object(
                 morning_brief,
+                "get_global_market_snapshot",
+            ) as get_global_markets, patch.object(
+                morning_brief,
                 "get_key_markets",
             ) as get_key_markets:
                 with self.assertRaisesRegex(RuntimeError, "_WEBHOOK is required"):
@@ -236,6 +250,7 @@ class MorningBriefRoutingTests(unittest.TestCase):
                 get_events.assert_not_called()
                 get_earnings.assert_not_called()
                 get_market.assert_not_called()
+                get_global_markets.assert_not_called()
                 get_key_markets.assert_not_called()
 
     def test_corrected_builder_outputs_route_to_expected_destinations(self):
@@ -254,6 +269,10 @@ class MorningBriefRoutingTests(unittest.TestCase):
         ), patch.object(
             morning_brief,
             "get_market_snapshot",
+            return_value=[],
+        ), patch.object(
+            morning_brief,
+            "get_global_market_snapshot",
             return_value=[],
         ), patch.object(
             morning_brief,
@@ -279,21 +298,127 @@ class MorningBriefRoutingTests(unittest.TestCase):
         market_message = send.call_args_list[0].args[2]
         earnings_message = send.call_args_list[1].args[2]
         choose_quote.assert_called_once_with(morning_brief.TRADING_QUOTES)
+        self.assertEqual(market_message.count("## 🌍 Global Markets"), 1)
         self.assertEqual(market_message.count("## 🧠 Trading Focus"), 1)
         self.assertEqual(market_message.count("## 🎥 Live Today"), 1)
         self.assertNotIn("## 🧠 Trading Focus", earnings_message)
         self.assertNotIn("## 🎥 Live Today", earnings_message)
+        self.assertNotIn("## 🌍 Global Markets", earnings_message)
         self.assertIn("**8:30 AM Eastern**", market_message)
         self.assertIn("**📢︱announcements**", market_message)
         self.assertTrue(earnings_message.endswith("━━━━━━━━━━━━━━━━━━━━━━━━━━━━"))
 
         self.assertEqual(
             hashlib.sha256(market_message.encode("utf-8")).hexdigest(),
-            "af096a12a9b8e366e145b5c628a72bf659a36b0b506d4ee999325a6cafc37b33",
+            "4e3cb6eacd4f0d8bff54081ffa7b3b2515152888e3df59a9127dd621defd46d0",
         )
         self.assertEqual(
             hashlib.sha256(earnings_message.encode("utf-8")).hexdigest(),
             "109988dce4249a21afea9235039a43f282d7c704a621ea502ce696fc51cd307a",
+        )
+
+    def test_global_snapshot_fetches_each_named_index_once(self):
+        quotes = [
+            {"price": 1000.0 + index, "percent_change": float(index)}
+            for index in range(len(morning_brief.GLOBAL_MARKET_SYMBOLS))
+        ]
+
+        with patch.object(
+            morning_brief,
+            "get_yahoo_index_quote",
+            side_effect=quotes,
+        ) as get_quote:
+            snapshot = morning_brief.get_global_market_snapshot()
+
+        self.assertEqual(
+            [call.args[0] for call in get_quote.call_args_list],
+            [symbol for symbol, _ in morning_brief.GLOBAL_MARKET_SYMBOLS],
+        )
+        self.assertEqual(
+            [item["name"] for item in snapshot],
+            [name for _, name in morning_brief.GLOBAL_MARKET_SYMBOLS],
+        )
+        self.assertEqual([item["quote"] for item in snapshot], quotes)
+
+    def test_yahoo_index_quote_uses_previous_close(self):
+        payload = {
+            "chart": {
+                "result": [
+                    {
+                        "meta": {
+                            "regularMarketPrice": 105.0,
+                            "chartPreviousClose": 100.0,
+                        },
+                        "indicators": {"quote": [{"close": [99.0, 105.0]}]},
+                    }
+                ]
+            }
+        }
+
+        with patch.object(
+            morning_brief,
+            "get_json",
+            return_value=payload,
+        ) as get_json:
+            quote = morning_brief.get_yahoo_index_quote("^N225")
+
+        self.assertEqual(quote, {"price": 105.0, "percent_change": 5.0})
+        requested_url = get_json.call_args.args[0]
+        self.assertIn("%5EN225", requested_url)
+        self.assertIn("range=5d", requested_url)
+        self.assertIn("interval=1d", requested_url)
+
+    def test_yahoo_index_failure_does_not_abort_morning_brief(self):
+        with patch.object(
+            morning_brief,
+            "get_json",
+            side_effect=TimeoutError("synthetic timeout"),
+        ), redirect_stdout(StringIO()) as output:
+            quote = morning_brief.get_yahoo_index_quote("^N225")
+
+        self.assertIsNone(quote)
+        self.assertIn("Global index unavailable for ^N225", output.getvalue())
+
+    def test_global_section_preserves_spacious_card_layout(self):
+        global_markets = [
+            {
+                "symbol": "^N225",
+                "name": "Nikkei 225",
+                "quote": {"price": 42000.0, "percent_change": 0.8},
+            },
+            {
+                "symbol": "^HSI",
+                "name": "Hang Seng",
+                "quote": None,
+            },
+        ]
+
+        with patch.object(
+            morning_brief,
+            "datetime",
+            FixedDateTime,
+        ), patch.object(
+            morning_brief.random,
+            "choice",
+            return_value=morning_brief.TRADING_QUOTES[0],
+        ):
+            message = morning_brief.build_market_message(
+                [],
+                [],
+                global_markets,
+                [],
+            )
+
+        self.assertIn("\n\n## 🌍 Global Markets\n\n", message)
+        self.assertIn("▲ **Nikkei 225:** 42,000.00 (+0.80%)", message)
+        self.assertIn("• **Hang Seng:** Unavailable", message)
+        self.assertLess(
+            message.index("## 📈 U.S. Market Snapshot"),
+            message.index("## 🌍 Global Markets"),
+        )
+        self.assertLess(
+            message.index("## 🌍 Global Markets"),
+            message.index("## 💰 Key Markets"),
         )
 
     def test_later_delivery_failure_preserves_sequential_order(self):

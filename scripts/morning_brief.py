@@ -358,6 +358,20 @@ KEY_MARKETS = [
 ]
 
 
+GLOBAL_MARKET_SYMBOLS = [
+    ("^N225", "Nikkei 225"),
+    ("^HSI", "Hang Seng"),
+    ("000001.SS", "Shanghai Composite"),
+    ("^NSEI", "Nifty 50"),
+    ("^FTSE", "FTSE 100"),
+    ("^GDAXI", "DAX"),
+    ("^FCHI", "CAC 40"),
+]
+
+
+YAHOO_CHART_BASE = "https://query1.finance.yahoo.com/v8/finance/chart"
+
+
 TRADING_QUOTES = [
     "Trade the reaction—not the prediction.",
     "Protecting capital comes before making profit.",
@@ -550,6 +564,74 @@ def get_key_markets():
     return results
 
 
+def yahoo_index_chart_url(symbol):
+    encoded_symbol = urllib.parse.quote(symbol)
+    query = urllib.parse.urlencode(
+        {
+            "range": "5d",
+            "interval": "1d",
+            "includeAdjustedClose": "true",
+        }
+    )
+    return f"{YAHOO_CHART_BASE}/{encoded_symbol}?{query}"
+
+
+def get_yahoo_index_quote(symbol):
+    try:
+        payload = get_json(yahoo_index_chart_url(symbol))
+        result = payload["chart"]["result"][0]
+        meta = result["meta"]
+        closes = [
+            float(value)
+            for value in result["indicators"]["quote"][0]["close"]
+            if value is not None
+        ]
+        price = meta.get("regularMarketPrice")
+        previous_close = (
+            meta.get("chartPreviousClose")
+            or meta.get("previousClose")
+        )
+
+        if price is None and closes:
+            price = closes[-1]
+        if previous_close is None and len(closes) >= 2:
+            previous_close = closes[-2]
+
+        price = float(price)
+        previous_close = float(previous_close)
+        if previous_close == 0:
+            raise ValueError("previous close is zero")
+
+        return {
+            "price": price,
+            "percent_change": ((price - previous_close) / previous_close) * 100,
+        }
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        KeyError,
+        IndexError,
+        TypeError,
+        ValueError,
+    ) as error:
+        print(f"Global index unavailable for {symbol}: {error}")
+        return None
+    except Exception as error:
+        print(f"Global index unavailable for {symbol}: {error}")
+        return None
+
+
+def get_global_market_snapshot():
+    return [
+        {
+            "symbol": symbol,
+            "name": name,
+            "quote": get_yahoo_index_quote(symbol),
+        }
+        for symbol, name in GLOBAL_MARKET_SYMBOLS
+    ]
+
+
 def direction_icon(percent_change):
     if percent_change is None:
         return "•"
@@ -596,6 +678,26 @@ def quote_line(item):
         f"{icon} **{item['symbol']} — "
         f"{item['name']}:** "
         f"{price_text} ({change_text})"
+    )
+
+
+def global_quote_line(item):
+    quote = item["quote"]
+
+    if not quote:
+        return f"• **{item['name']}:** Unavailable"
+
+    change = quote["percent_change"]
+    icon = direction_icon(change)
+    change_text = (
+        f"{change:+.2f}%"
+        if change is not None
+        else "Change unavailable"
+    )
+
+    return (
+        f"{icon} **{item['name']}:** "
+        f"{quote['price']:,.2f} ({change_text})"
     )
 
 
@@ -810,6 +912,7 @@ def build_earnings_group(
 def build_market_message(
     events,
     market_snapshot,
+    global_markets,
     key_markets,
 ):
     today = datetime.now(EASTERN)
@@ -888,6 +991,22 @@ def build_market_message(
                 "*ETF proxies shown; these "
                 "are not futures contracts.*"
             ),
+            "",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "",
+            "## 🌍 Global Markets",
+            "",
+        ]
+    )
+
+    if global_markets:
+        for item in global_markets:
+            lines.append(global_quote_line(item))
+    else:
+        lines.append("• Global index data unavailable.")
+
+    lines.extend(
+        [
             "",
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
             "",
@@ -1208,11 +1327,13 @@ def main():
     events = get_high_impact_usd_events()
     earnings = get_all_earnings()
     market_snapshot = get_market_snapshot()
+    global_markets = get_global_market_snapshot()
     key_markets = get_key_markets()
 
     market_message = build_market_message(
         events,
         market_snapshot,
+        global_markets,
         key_markets,
     )
 
