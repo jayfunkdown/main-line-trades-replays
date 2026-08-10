@@ -41,6 +41,24 @@ class FakeResponse:
         return False
 
 
+class WindowsConsole:
+    encoding = "cp1252"
+
+    def __init__(self):
+        self.output = ""
+
+    def reconfigure(self, *, encoding):
+        self.encoding = encoding
+
+    def write(self, value):
+        value.encode(self.encoding)
+        self.output += value
+        return len(value)
+
+    def flush(self):
+        pass
+
+
 class MarketWrapTests(unittest.TestCase):
     def setUp(self):
         self.market = [
@@ -181,6 +199,15 @@ class MarketWrapTests(unittest.TestCase):
         preview = json.loads(output.getvalue())
         self.assertEqual(preview["username"], "Main Line Trades Market Wrap")
         self.assertEqual(len(preview["embeds"]), 1)
+
+    def test_preview_reconfigures_windows_console_for_emoji(self):
+        console = WindowsConsole()
+
+        with patch.object(market_wrap.sys, "stdout", console):
+            market_wrap.print_preview(self.payload())
+
+        self.assertEqual(console.encoding, "utf-8")
+        self.assertIn("🌆 Main Line Trades Market Wrap", console.output)
 
     def test_post_fetches_once_and_delivers_once(self):
         with patch.dict(

@@ -8,6 +8,7 @@ load_dotenv()
 import argparse
 import json
 import os
+import sys
 import urllib.request
 from datetime import datetime
 
@@ -278,6 +279,15 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
+def print_preview(payload):
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+
+    if callable(reconfigure):
+        reconfigure(encoding="utf-8")
+
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
 def main(argv=None):
     args = parse_args(argv)
     webhook_url = required_webhook() if args.post else None
@@ -292,7 +302,7 @@ def main(argv=None):
     )
 
     if args.preview:
-        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        print_preview(payload)
         return
 
     send_market_wrap(webhook_url, payload)
