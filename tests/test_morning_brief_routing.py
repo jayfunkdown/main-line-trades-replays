@@ -197,7 +197,7 @@ class MorningBriefRoutingTests(unittest.TestCase):
         self.assertTrue(all(len(description) <= 12 for description in descriptions))
         self.assertTrue(all("earnings" not in description for description in descriptions[:2]))
         self.assertTrue(all("morning" not in description for description in descriptions[2:]))
-        self.assertTrue(all(payload["embeds"][0]["color"] == 0x5865F2 for payload in payloads))
+        self.assertTrue(all(payload["embeds"][0]["color"] == 0x00CFFF for payload in payloads))
         sleep.assert_called_once_with(10)
 
     def test_missing_or_empty_destination_fails_before_fetch_or_network(self):

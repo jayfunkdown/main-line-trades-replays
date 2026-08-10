@@ -52,7 +52,7 @@ class BorderedTrendSpiderPostTests(unittest.TestCase):
             payload["embeds"][0],
             {
                 "description": "**SPY — Weekly Chart**",
-                "color": 0x5865F2,
+                "color": 0x00CFFF,
                 "image": {"url": "https://example.com/chart.png"},
             },
         )
