@@ -11,6 +11,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now mainline-earnings-review.service
 sudo systemctl enable --now \
   mainline-earnings-post.timer \
+  mainline-market-wrap.timer \
   mainline-morning-brief.timer \
   mainline-trendspider.timer \
   mainline-trump-filter.timer \

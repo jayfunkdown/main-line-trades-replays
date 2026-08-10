@@ -1,0 +1,10 @@
+[Unit]
+Description=Post Main Line Trades Market Wrap Weekdays at 4:15 PM ET
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 16:15:00 America/New_York
+Persistent=true
+Unit=mainline-market-wrap.service
+
+[Install]
+WantedBy=timers.target
