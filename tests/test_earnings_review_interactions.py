@@ -67,18 +67,14 @@ class EarningsSignalMessageFormattingTests(unittest.TestCase):
             "revenue_direction": "beat",
         }
 
-    def test_signal_divider_leads_the_next_trade_signal(self):
+    def test_signal_message_relies_on_the_embed_border(self):
         message = earnings_reactions.build_signal_message(
             self.candidate(),
             "Weekly continuation coming up",
         )
 
-        self.assertTrue(
-            message.startswith(
-                f"{earnings_reactions.DIVIDER}\n\n# 📈 Trade Signal"
-            )
-        )
-        self.assertEqual(message.count(earnings_reactions.DIVIDER), 1)
+        self.assertTrue(message.startswith("# 📈 Trade Signal"))
+        self.assertNotIn(earnings_reactions.DIVIDER, message)
 
     def test_signal_divider_is_not_clumped_above_the_chart(self):
         message = earnings_reactions.build_signal_message(
@@ -346,6 +342,22 @@ class EarningsReviewInteractionAuthorizationTests(
 
                 attachment.to_file.assert_awaited_once()
                 signals_channel.send.assert_awaited_once()
+                send_kwargs = signals_channel.send.await_args.kwargs
+                self.assertNotIn("content", send_kwargs)
+                self.assertEqual(
+                    send_kwargs["embed"].to_dict(),
+                    {
+                        "description": earnings_reactions.build_signal_message(
+                            state["signal_queue"]["token"]["candidate"],
+                            "Trade above resistance.",
+                        ),
+                        "color": 0xFF2BD6,
+                        "image": {
+                            "url": "attachment://ACME_trade_chart.png",
+                        },
+                        "flags": 0,
+                    },
+                )
                 self.assertEqual(update_state.call_count, 2)
                 self.assertTrue(
                     state["signal_queue"]["token"]["sent_to_signals"]

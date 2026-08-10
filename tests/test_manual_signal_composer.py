@@ -72,7 +72,6 @@ class ManualSignalPureBehaviorTests(unittest.TestCase):
                 timeframe="15m",
                 setup_name="Opening drive",
             ),
-            f"{earnings_reactions.DIVIDER}\n\n"
             "# 📈 Trade Signal\n\n"
             "## ES futures\n\n"
             "🕒 **Timeframe:** 15m\n"
@@ -91,7 +90,7 @@ class ManualSignalPureBehaviorTests(unittest.TestCase):
         self.assertNotIn("Timeframe", content)
         self.assertNotIn("Setup:", content)
         self.assertIn("## BTC/USD", content)
-        self.assertIn(earnings_reactions.DIVIDER, content)
+        self.assertNotIn(earnings_reactions.DIVIDER, content)
         self.assertNotIn("\n---\n", content)
 
     def test_non_stock_instruments_and_message_boundary(self):
@@ -417,11 +416,20 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
         ):
             await modal.on_submit(submit)
         sent = self.drafts.send.await_args.kwargs
+        self.assertNotIn("content", sent)
         self.assertEqual(
-            sent["content"],
-            earnings_reactions.build_manual_signal_message(
-                "EUR/USD", "Hold the breakout.", timeframe="4h", setup_name="Retest"
-            ),
+            sent["embed"].to_dict(),
+            {
+                "description": earnings_reactions.build_manual_signal_message(
+                    "EUR/USD",
+                    "Hold the breakout.",
+                    timeframe="4h",
+                    setup_name="Retest",
+                ),
+                "color": 0xFF2BD6,
+                "image": {"url": "attachment://chart.png"},
+                "flags": 0,
+            },
         )
         self.assertIsInstance(sent["allowed_mentions"], discord.AllowedMentions)
         record = next(iter(self.state["manual_signal_drafts"].values()))
@@ -468,6 +476,11 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
         ):
             await modal.on_submit(submit)
         self.assertNotIn("attachments", message.edit.await_args.kwargs)
+        self.assertIsNone(message.edit.await_args.kwargs["content"])
+        self.assertEqual(
+            message.edit.await_args.kwargs["embed"].to_dict()["image"]["url"],
+            "attachment://chart.png",
+        )
         self.assertEqual(
             self.state["manual_signal_drafts"]["draft"]["chart"]["filename"],
             "chart.png",
@@ -490,6 +503,10 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
         ):
             await replacement_modal.on_submit(submit)
         self.assertIn("attachments", message.edit.await_args.kwargs)
+        self.assertEqual(
+            message.edit.await_args.kwargs["embed"].to_dict()["image"]["url"],
+            "attachment://replacement.webp",
+        )
         self.assertEqual(
             self.state["manual_signal_drafts"]["draft"]["chart"]["filename"],
             "replacement.webp",
@@ -814,7 +831,11 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.signals.send.assert_awaited_once()
         self.assertIn(
             "Completely updated thesis",
-            self.signals.send.await_args.kwargs["content"],
+            self.signals.send.await_args.kwargs["embed"].description,
+        )
+        self.assertEqual(
+            self.signals.send.await_args.kwargs["embed"].to_dict()["image"]["url"],
+            "attachment://updated.webp",
         )
         self.assertEqual(
             self.signals.send.await_args.kwargs["file"],
