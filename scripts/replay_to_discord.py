@@ -35,6 +35,7 @@ USER_AGENT = "MainLineTrades-ReplayBot/4.0"
 STATE_PATH = PROJECT_ROOT / "data" / "posted_ids.json"
 TRAINING_STATE_PATH = PROJECT_ROOT / "data" / "training_posted_ids.json"
 VIDEO_INTEL_STATE_PATH = PROJECT_ROOT / "data" / "video_intel_posted_ids.json"
+VIDEO_INTEL_MIN_DURATION_SECONDS = 181
 
 TRAINING_PLAYLIST_ID = "PLqMtQ22Ff3lF6HlsG2fpM96IQZ77hWGGt"
 VIDEO_INTEL_CHANNEL_HANDLES = (
@@ -335,6 +336,21 @@ def parse_iso_duration(value: str) -> str:
     return f"{seconds}s"
 
 
+def parse_iso_duration_seconds(value: str) -> int | None:
+    match = re.fullmatch(
+        r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?",
+        value or "",
+    )
+
+    if not match:
+        return None
+
+    hours = int(match.group(1) or 0)
+    minutes = int(match.group(2) or 0)
+    seconds = int(match.group(3) or 0)
+    return (hours * 60 * 60) + (minutes * 60) + seconds
+
+
 def best_thumbnail(
     thumbnails: dict[str, Any],
 ) -> str:
@@ -360,7 +376,7 @@ def best_thumbnail(
 
 def normalize_video_item(
     item: dict[str, Any],
-) -> dict[str, str] | None:
+) -> dict[str, Any] | None:
     snippet = item.get("snippet") or {}
     content_details = item.get("contentDetails") or {}
 
@@ -385,6 +401,11 @@ def normalize_video_item(
     if not isinstance(thumbnails, dict):
         thumbnails = {}
 
+    duration_value = str(
+        content_details.get("duration")
+        or ""
+    )
+
     return {
         "id": video_id,
         "title": title,
@@ -393,12 +414,8 @@ def normalize_video_item(
             f"?v={video_id}"
         ),
         "published": published,
-        "duration": parse_iso_duration(
-            str(
-                content_details.get("duration")
-                or ""
-            )
-        ),
+        "duration": parse_iso_duration(duration_value),
+        "duration_seconds": parse_iso_duration_seconds(duration_value),
         "thumbnail": best_thumbnail(thumbnails),
         "channel_id": str(snippet.get("channelId") or "").strip(),
         "channel_title": str(snippet.get("channelTitle") or "").strip(),
@@ -579,10 +596,21 @@ def fetch_video_intel_videos(
                 video["channel_title"] = channel["title"]
             if not video.get("channel_id"):
                 video["channel_id"] = channel["id"]
+            if not is_long_form_video(video):
+                continue
             videos_by_id[video["id"]] = video
     return sorted(
         videos_by_id.values(),
         key=lambda item: item["published"],
+    )
+
+
+def is_long_form_video(video: dict[str, Any]) -> bool:
+    duration_seconds = video.get("duration_seconds")
+    return (
+        isinstance(duration_seconds, int)
+        and not isinstance(duration_seconds, bool)
+        and duration_seconds >= VIDEO_INTEL_MIN_DURATION_SECONDS
     )
 
 
