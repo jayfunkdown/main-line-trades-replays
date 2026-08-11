@@ -306,7 +306,7 @@ class MorningBriefRoutingTests(unittest.TestCase):
         self.assertNotIn("## 🌍 Global Markets", earnings_message)
         self.assertEqual(earnings_message.count("🔥 **Priority guide:**"), 1)
         self.assertIn("⭐⭐⭐⭐⭐ High impact", earnings_message)
-        self.assertIn("⭐⭐⭐⭐ Active trading watchlist", earnings_message)
+        self.assertIn("⭐⭐⭐⭐ Actively Traded / High Volume", earnings_message)
         self.assertIn("⭐⭐⭐ Major sector leader", earnings_message)
         self.assertIn("**8:30 AM Eastern**", market_message)
         self.assertIn("**📢︱announcements**", market_message)
@@ -318,7 +318,7 @@ class MorningBriefRoutingTests(unittest.TestCase):
         )
         self.assertEqual(
             hashlib.sha256(earnings_message.encode("utf-8")).hexdigest(),
-            "e1bf470d0ae79cfe061fe3b4dfb3d7b5a03033fc5e5b450ad1c0fc0e645e26f4",
+            "ee3aa059ad0f468640307b95e88d1eceb58def5a8cf167eddd3ee3c44d231611",
         )
 
     def test_earnings_priority_guide_and_star_tiers_are_visible(self):
