@@ -1,0 +1,10 @@
+[Unit]
+Description=Main Line Trades YouTube Video Intel Checker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=jason
+WorkingDirectory=/home/jason/main-line-trades-replays
+ExecStart=/home/jason/main-line-trades-replays/.venv/bin/python /home/jason/main-line-trades-replays/scripts/replay_to_discord.py --post --feed video-intel --limit 3

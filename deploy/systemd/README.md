@@ -17,6 +17,7 @@ sudo systemctl enable --now \
   mainline-trump-filter.timer \
   mainline-weekly-calendar.timer \
   mainline-youtube-training.timer \
+  mainline-youtube-video-intel.timer \
   mainline-youtube-replays.timer
 ```
 

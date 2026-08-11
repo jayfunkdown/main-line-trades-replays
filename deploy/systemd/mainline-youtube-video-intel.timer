@@ -1,0 +1,10 @@
+[Unit]
+Description=Check Selected YouTube Video Intel Channels Every 30 Minutes
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=30min
+Unit=mainline-youtube-video-intel.service
+
+[Install]
+WantedBy=timers.target
