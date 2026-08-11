@@ -41,6 +41,7 @@ VIDEO_INTEL_CHANNEL_HANDLES = (
     "@JasonPizzinoOfficial",
     "@TheDiaryOfACEO",
     "@GrahamStephan",
+    "@HeresyFinancial",
 )
 
 DEFAULT_TITLE_PREFIX = "🔴 Live Trading"
@@ -1160,7 +1161,8 @@ def main() -> int:
             )
             print(
                 f"Initialized Video Intel state with {len(videos)} existing "
-                "video(s) across 3 channels. Nothing posted."
+                f"video(s) across {len(VIDEO_INTEL_CHANNEL_HANDLES)} channels. "
+                "Nothing posted."
             )
             return 0
     else:
