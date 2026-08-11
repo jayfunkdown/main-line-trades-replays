@@ -34,8 +34,14 @@ USER_AGENT = "MainLineTrades-ReplayBot/4.0"
 
 STATE_PATH = PROJECT_ROOT / "data" / "posted_ids.json"
 TRAINING_STATE_PATH = PROJECT_ROOT / "data" / "training_posted_ids.json"
+VIDEO_INTEL_STATE_PATH = PROJECT_ROOT / "data" / "video_intel_posted_ids.json"
 
 TRAINING_PLAYLIST_ID = "PLqMtQ22Ff3lF6HlsG2fpM96IQZ77hWGGt"
+VIDEO_INTEL_CHANNEL_HANDLES = (
+    "@JasonPizzinoOfficial",
+    "@TheDiaryOfACEO",
+    "@GrahamStephan",
+)
 
 DEFAULT_TITLE_PREFIX = "🔴 Live Trading"
 DEFAULT_FETCH_LIMIT = 25
@@ -59,6 +65,13 @@ TRAINING_EMBED_DESCRIPTION = (
     "Build your trading knowledge with this Main Line Trades tutorial."
 )
 TRAINING_EMBED_FOOTER = "Main Line Trades • Training Video"
+
+VIDEO_INTEL_WEBHOOK_USERNAME = "Main Line Trades Video Intel"
+VIDEO_INTEL_EMBED_DESCRIPTION = (
+    "Selected video insight covering markets, economics, business, "
+    "and the broader macro picture."
+)
+VIDEO_INTEL_EMBED_FOOTER = "Main Line Trades • Video Intel"
 
 # Used only by --test so the test has the same full visual layout,
 # including the large image.
@@ -235,6 +248,47 @@ def get_uploads_playlist_id(
     return playlist_id
 
 
+def get_channel_for_handle(
+    handle: str,
+    api_key: str,
+) -> dict[str, str]:
+    response = youtube_api_get(
+        "channels",
+        {
+            "part": "snippet,contentDetails",
+            "forHandle": handle,
+            "maxResults": 1,
+        },
+        api_key,
+    )
+    items = response.get("items", [])
+    if not items:
+        raise RuntimeError(
+            f"YouTube channel was not found for handle {handle}."
+        )
+    try:
+        item = items[0]
+        channel_id = str(item["id"]).strip()
+        channel_title = str(item["snippet"]["title"]).strip()
+        playlist_id = str(
+            item["contentDetails"]["relatedPlaylists"]["uploads"]
+        ).strip()
+    except (KeyError, IndexError, TypeError) as error:
+        raise RuntimeError(
+            f"YouTube returned incomplete channel data for {handle}."
+        ) from error
+    if not channel_id or not channel_title or not playlist_id:
+        raise RuntimeError(
+            f"YouTube returned empty channel data for {handle}."
+        )
+    return {
+        "handle": handle,
+        "id": channel_id,
+        "title": channel_title,
+        "uploads_playlist_id": playlist_id,
+    }
+
+
 def parse_youtube_datetime(value: str) -> datetime | None:
     if not value:
         return None
@@ -345,6 +399,8 @@ def normalize_video_item(
             )
         ),
         "thumbnail": best_thumbnail(thumbnails),
+        "channel_id": str(snippet.get("channelId") or "").strip(),
+        "channel_title": str(snippet.get("channelTitle") or "").strip(),
     }
 
 
@@ -505,6 +561,30 @@ def fetch_playlist_videos(
     return sorted(videos, key=lambda item: item["published"])
 
 
+def fetch_video_intel_videos(
+    handles: tuple[str, ...],
+    api_key: str,
+    fetch_limit: int,
+) -> list[dict[str, str]]:
+    videos_by_id: dict[str, dict[str, str]] = {}
+    for handle in handles:
+        channel = get_channel_for_handle(handle, api_key)
+        for video in fetch_playlist_videos(
+            channel["uploads_playlist_id"],
+            api_key,
+            fetch_limit,
+        ):
+            if not video.get("channel_title"):
+                video["channel_title"] = channel["title"]
+            if not video.get("channel_id"):
+                video["channel_id"] = channel["id"]
+            videos_by_id[video["id"]] = video
+    return sorted(
+        videos_by_id.values(),
+        key=lambda item: item["published"],
+    )
+
+
 # ============================================================
 # Exact approved Discord embed
 # ============================================================
@@ -612,6 +692,46 @@ def build_training_embed(
             },
         ],
         "footer": {"text": TRAINING_EMBED_FOOTER},
+    }
+    thumbnail = video.get("thumbnail", "").strip()
+    if thumbnail:
+        embed["image"] = {"url": thumbnail}
+    return embed
+
+
+def build_video_intel_embed(
+    video: dict[str, str],
+) -> dict[str, Any]:
+    source = video.get("channel_title", "").strip() or "YouTube"
+    embed: dict[str, Any] = {
+        "color": EMBED_COLOR,
+        "author": {"name": EMBED_AUTHOR},
+        "title": f"🎥 {video['title'].strip()}",
+        "url": video["url"],
+        "description": VIDEO_INTEL_EMBED_DESCRIPTION,
+        "fields": [
+            {
+                "name": "📺 Source",
+                "value": source,
+                "inline": False,
+            },
+            {
+                "name": "📅 Published",
+                "value": format_stream_date(video.get("published", "")),
+                "inline": True,
+            },
+            {
+                "name": "⏱️ Duration",
+                "value": video.get("duration", "Unknown"),
+                "inline": True,
+            },
+            {
+                "name": "▶️ Watch Video",
+                "value": f"[Open the full video]({video['url']})",
+                "inline": False,
+            },
+        ],
+        "footer": {"text": VIDEO_INTEL_EMBED_FOOTER},
     }
     thumbnail = video.get("thumbnail", "").strip()
     if thumbnail:
@@ -750,6 +870,17 @@ def post_training_embed(
     )
 
 
+def post_video_intel_embed(
+    webhook_url: str,
+    video: dict[str, str],
+) -> None:
+    post_video_embed(
+        webhook_url,
+        build_video_intel_embed(video),
+        VIDEO_INTEL_WEBHOOK_USERNAME,
+    )
+
+
 # ============================================================
 # CLI
 # ============================================================
@@ -791,7 +922,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--feed",
-        choices=("replay", "training"),
+        choices=("replay", "training", "video-intel"),
         default="replay",
         help="YouTube feed to process (default: replay).",
     )
@@ -868,10 +999,14 @@ def preview_video(
     video: dict[str, str],
     feed: str = "replay",
 ) -> None:
-    label = "TRAINING VIDEO" if feed == "training" else "YOUTUBE REPLAY"
+    label = {
+        "training": "TRAINING VIDEO",
+        "video-intel": "VIDEO INTEL",
+        "replay": "YOUTUBE REPLAY",
+    }[feed]
     title = (
         video["title"].strip()
-        if feed == "training"
+        if feed in {"training", "video-intel"}
         else clean_display_title(video["title"])
     )
     print(
@@ -881,6 +1016,7 @@ def preview_video(
         f"Title: {title}\n"
         f"Date: {format_stream_date(video['published'])}\n"
         f"Duration: {video['duration']}\n"
+        f"Source: {video.get('channel_title', 'YouTube')}\n"
         f"Thumbnail: {video['thumbnail']}\n"
         f"URL: {video['url']}\n"
         "==================================\n"
@@ -928,11 +1064,11 @@ def main() -> int:
 
     if args.post or args.test:
         webhook_url = required_env(
-            (
-                "TRAINING_VIDEOS_WEBHOOK"
-                if args.feed == "training"
-                else "DISCORD_WEBHOOK_URL"
-            )
+            {
+                "training": "TRAINING_VIDEOS_WEBHOOK",
+                "video-intel": "VIDEO_INTEL_WEBHOOK",
+                "replay": "DISCORD_WEBHOOK_URL",
+            }[args.feed]
         )
 
     api_key = required_env(
@@ -966,6 +1102,8 @@ def main() -> int:
 
         if args.feed == "training":
             post_training_embed(webhook_url, test_video)
+        elif args.feed == "video-intel":
+            post_video_intel_embed(webhook_url, test_video)
         else:
             post_replay_embed(webhook_url, test_video)
 
@@ -974,11 +1112,11 @@ def main() -> int:
         )
         return 0
 
-    state_path = (
-        TRAINING_STATE_PATH
-        if args.feed == "training"
-        else STATE_PATH
-    )
+    state_path = {
+        "training": TRAINING_STATE_PATH,
+        "video-intel": VIDEO_INTEL_STATE_PATH,
+        "replay": STATE_PATH,
+    }[args.feed]
     processed_ids = load_processed_ids(state_path)
     processed_set = set(processed_ids)
 
@@ -1004,6 +1142,25 @@ def main() -> int:
             print(
                 f"Initialized training state with {len(videos)} existing "
                 "playlist video(s). Nothing posted."
+            )
+            return 0
+    elif args.feed == "video-intel":
+        videos = fetch_video_intel_videos(
+            VIDEO_INTEL_CHANNEL_HANDLES,
+            api_key,
+            args.fetch_limit,
+        )
+
+        # Critical protection: seed every currently visible upload without
+        # posting so enabling the timer can never backfill these channels.
+        if args.post and not processed_ids:
+            save_processed_ids(
+                [video["id"] for video in videos],
+                state_path,
+            )
+            print(
+                f"Initialized Video Intel state with {len(videos)} existing "
+                "video(s) across 3 channels. Nothing posted."
             )
             return 0
     else:
@@ -1096,6 +1253,8 @@ def main() -> int:
 
         if args.feed == "training":
             post_training_embed(webhook_url, video)
+        elif args.feed == "video-intel":
+            post_video_intel_embed(webhook_url, video)
         else:
             post_replay_embed(webhook_url, video)
 

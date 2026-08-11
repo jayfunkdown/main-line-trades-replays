@@ -226,6 +226,24 @@ Processed state:
 The initial playlist import is explicit and uses `--import-existing`; normal
 timer runs never backfill an empty state.
 
+## YouTube Video Intel
+
+    scripts/replay_to_discord.py --post --feed video-intel
+
+Watches the three approved external YouTube channels and publishes newly added
+videos in the branded Video Intel card format.
+
+Production polling:
+
+    Every 30 minutes
+
+Processed state:
+
+    data/video_intel_posted_ids.json
+
+An empty state is seeded from current uploads without posting. Historical
+videos must never be backfilled automatically.
+
 ---
 
 # 4. Production Services and Timers
@@ -258,6 +276,9 @@ Scheduled units:
 
     mainline-youtube-training.service
     mainline-youtube-training.timer
+
+    mainline-youtube-video-intel.service
+    mainline-youtube-video-intel.timer
 
 Copies of these production units are stored in:
 
@@ -348,6 +369,7 @@ These files are production runtime state:
     data/trump_processed.json
     data/posted_ids.json
     data/training_posted_ids.json
+    data/video_intel_posted_ids.json
 
 Generated earnings charts are also runtime output:
 
