@@ -373,9 +373,16 @@ MARKET_SYMBOLS = [
 ]
 
 
-KEY_MARKETS = [
+CRYPTO_MARKETS = [
     ("BINANCE:BTCUSDT", "BTC", "₿ Bitcoin", "finnhub", True, "$"),
+    ("BINANCE:ETHUSDT", "ETH", "Ethereum", "finnhub", True, "$"),
+    ("BINANCE:XRPUSDT", "XRP", "XRP", "finnhub", True, "$"),
+]
+
+
+KEY_MARKETS = [
     ("GC=F", "GC", "🥇 Gold Futures", "yahoo", False, "$"),
+    ("SI=F", "SI", "🥈 Silver Futures", "yahoo", False, "$"),
     ("CL=F", "CL", "🛢️ Crude Oil Futures", "yahoo", False, "$"),
     ("DX-Y.NYB", "DXY", "💵 U.S. Dollar Index", "yahoo", False, ""),
 ]
@@ -566,7 +573,7 @@ def get_market_snapshot():
     ]
 
 
-def get_key_markets():
+def get_configured_markets(definitions):
     results = []
 
     for (
@@ -576,7 +583,7 @@ def get_key_markets():
         source,
         is_crypto,
         price_prefix,
-    ) in KEY_MARKETS:
+    ) in definitions:
         results.append(
             {
                 "symbol": display_symbol,
@@ -592,6 +599,14 @@ def get_key_markets():
         )
 
     return results
+
+
+def get_crypto_markets():
+    return get_configured_markets(CRYPTO_MARKETS)
+
+
+def get_key_markets():
+    return get_configured_markets(KEY_MARKETS)
 
 
 def yahoo_index_chart_url(symbol):
@@ -677,6 +692,8 @@ def direction_icon(percent_change):
 
 def format_price(price, is_crypto=False, price_prefix="$"):
     if is_crypto:
+        if abs(price) < 100:
+            return f"{price_prefix}{price:,.2f}"
         return f"{price_prefix}{price:,.0f}"
 
     return f"{price_prefix}{price:,.2f}"
@@ -1027,6 +1044,7 @@ def build_market_message(
     market_snapshot,
     global_markets,
     key_markets,
+    crypto_markets=None,
 ):
     today = datetime.now(EASTERN)
 
@@ -1120,6 +1138,22 @@ def build_market_message(
             lines.append(global_quote_line(item))
     else:
         lines.append("• Global index data unavailable.")
+
+    lines.extend(
+        [
+            "",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "",
+            "## ₿ Crypto Markets",
+            "",
+        ]
+    )
+
+    if crypto_markets:
+        for item in crypto_markets:
+            lines.append(quote_line(item))
+    else:
+        lines.append("• Crypto market data unavailable.")
 
     lines.extend(
         [
@@ -1452,6 +1486,7 @@ def main():
     earnings = get_all_earnings()
     market_snapshot = get_market_snapshot()
     global_markets = get_global_market_snapshot()
+    crypto_markets = get_crypto_markets()
     key_markets = get_key_markets()
 
     market_message = build_market_message(
@@ -1459,6 +1494,7 @@ def main():
         market_snapshot,
         global_markets,
         key_markets,
+        crypto_markets,
     )
 
     earnings_message = build_earnings_message(

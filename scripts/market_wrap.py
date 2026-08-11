@@ -36,17 +36,6 @@ DISCORD_EMBED_FIELD_NAME_LIMIT = 256
 DISCORD_EMBED_FIELD_VALUE_LIMIT = 1024
 DISCORD_EMBED_FOOTER_LIMIT = 2048
 
-CRYPTO_SYMBOLS = [
-    ("BINANCE:BTCUSDT", "BTC", "Bitcoin"),
-    ("BINANCE:ETHUSDT", "ETH", "Ethereum"),
-]
-
-CROSS_MARKET_SYMBOLS = [
-    ("GLD", "Gold ETF"),
-    ("USO", "Oil ETF"),
-    ("UUP", "U.S. Dollar ETF"),
-]
-
 GLOBAL_MARKET_SYMBOLS = [
     ("^N225", "Nikkei 225"),
     ("^HSI", "Hang Seng"),
@@ -73,18 +62,11 @@ def get_named_quotes(symbols, *, is_crypto=False):
 
 
 def get_crypto_snapshot():
-    return get_named_quotes(
-        CRYPTO_SYMBOLS,
-        is_crypto=True,
-    )
+    return morning_brief.get_crypto_markets()
 
 
 def get_cross_market_snapshot():
-    symbols = [
-        (symbol, symbol, name)
-        for symbol, name in CROSS_MARKET_SYMBOLS
-    ]
-    return get_named_quotes(symbols)
+    return morning_brief.get_key_markets()
 
 
 def yahoo_index_chart_url(symbol):
@@ -188,12 +170,12 @@ def session_read(market_snapshot):
     negative = sum(change < 0 for change in changes)
 
     if positive >= 3:
-        return "Broadly positive U.S. close across the major index ETFs."
+        return "Broadly positive U.S. close across the major index futures."
 
     if negative >= 3:
-        return "Broadly negative U.S. close across the major index ETFs."
+        return "Broadly negative U.S. close across the major index futures."
 
-    return "Mixed U.S. close with leadership divided across the major index ETFs."
+    return "Mixed U.S. close with leadership divided across the major index futures."
 
 
 def quote_block(items):
@@ -228,18 +210,31 @@ def global_market_block(items):
 def market_wrap_description(date_label, sections):
     parts = [
         "# 🌆 Main Line Trades Market Wrap",
+        "",
         f"**{date_label}**",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "",
         (
             "The closing snapshot for U.S. and global markets, crypto, "
             "and key cross-market signals."
         ),
     ]
 
-    parts.extend(
-        f"## {section['name']}\n{section['value']}"
-        for section in sections
-    )
-    return "\n\n".join(parts)
+    for section in sections:
+        parts.extend(
+            [
+                "",
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                "",
+                f"## {section['name']}",
+                "",
+                section["value"],
+            ]
+        )
+
+    parts.extend(["", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"])
+    return "\n".join(parts)
 
 
 def economic_results_block(events, limit=DISCORD_EMBED_FIELD_VALUE_LIMIT):
@@ -308,13 +303,8 @@ def build_market_wrap_payload(
 
     sections = [
         {
-            "name": "📈 U.S. Market Close",
-            "value": quote_block(market_snapshot),
-            "inline": False,
-        },
-        {
-            "name": "🌍 Global Markets",
-            "value": global_market_block(global_market_snapshot or []),
+            "name": "🌆 Session Read",
+            "value": session_read(market_snapshot),
             "inline": False,
         },
     ]
@@ -331,18 +321,23 @@ def build_market_wrap_payload(
     sections.extend(
         [
             {
-                "name": "₿ Crypto Snapshot",
+                "name": "📉 U.S. Futures Close",
+                "value": quote_block(market_snapshot),
+                "inline": False,
+            },
+            {
+                "name": "🌍 Global Markets",
+                "value": global_market_block(global_market_snapshot or []),
+                "inline": False,
+            },
+            {
+                "name": "₿ Crypto Markets",
                 "value": quote_block(crypto_snapshot),
                 "inline": False,
             },
             {
-                "name": "🌐 Key Markets",
+                "name": "💰 Key Markets",
                 "value": quote_block(cross_market_snapshot),
-                "inline": False,
-            },
-            {
-                "name": "🧠 Session Read",
-                "value": session_read(market_snapshot),
                 "inline": False,
             },
             {

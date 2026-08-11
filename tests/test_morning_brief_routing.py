@@ -65,6 +65,7 @@ class MorningBriefRoutingTests(unittest.TestCase):
         ]
         market_snapshot = []
         global_markets = []
+        crypto_markets = []
         key_markets = []
 
         with patch.dict(os.environ, self.environment(), clear=True), patch.object(
@@ -84,6 +85,10 @@ class MorningBriefRoutingTests(unittest.TestCase):
             "get_global_market_snapshot",
             return_value=global_markets,
         ) as get_global_markets, patch.object(
+            morning_brief,
+            "get_crypto_markets",
+            return_value=crypto_markets,
+        ) as get_crypto_markets, patch.object(
             morning_brief,
             "get_key_markets",
             return_value=key_markets,
@@ -108,12 +113,14 @@ class MorningBriefRoutingTests(unittest.TestCase):
         get_earnings.assert_called_once_with()
         get_market.assert_called_once_with()
         get_global_markets.assert_called_once_with()
+        get_crypto_markets.assert_called_once_with()
         get_key_markets.assert_called_once_with()
         build_market.assert_called_once_with(
             events,
             market_snapshot,
             global_markets,
             key_markets,
+            crypto_markets,
         )
         build_earnings.assert_called_once_with(earnings)
         send.assert_has_calls(
@@ -240,9 +247,12 @@ class MorningBriefRoutingTests(unittest.TestCase):
             ) as get_market, patch.object(
                 morning_brief,
                 "get_global_market_snapshot",
-            ) as get_global_markets, patch.object(
-                morning_brief,
-                "get_key_markets",
+        ) as get_global_markets, patch.object(
+            morning_brief,
+            "get_crypto_markets",
+        ) as get_crypto_markets, patch.object(
+            morning_brief,
+            "get_key_markets",
             ) as get_key_markets:
                 with self.assertRaisesRegex(RuntimeError, "_WEBHOOK is required"):
                     morning_brief.main()
@@ -251,6 +261,7 @@ class MorningBriefRoutingTests(unittest.TestCase):
                 get_earnings.assert_not_called()
                 get_market.assert_not_called()
                 get_global_markets.assert_not_called()
+                get_crypto_markets.assert_not_called()
                 get_key_markets.assert_not_called()
 
     def test_corrected_builder_outputs_route_to_expected_destinations(self):
@@ -273,6 +284,10 @@ class MorningBriefRoutingTests(unittest.TestCase):
         ), patch.object(
             morning_brief,
             "get_global_market_snapshot",
+            return_value=[],
+        ), patch.object(
+            morning_brief,
+            "get_crypto_markets",
             return_value=[],
         ), patch.object(
             morning_brief,
@@ -299,6 +314,7 @@ class MorningBriefRoutingTests(unittest.TestCase):
         earnings_message = send.call_args_list[1].args[2]
         choose_quote.assert_called_once_with(morning_brief.TRADING_QUOTES)
         self.assertEqual(market_message.count("## 🌍 Global Markets"), 1)
+        self.assertEqual(market_message.count("## ₿ Crypto Markets"), 1)
         self.assertEqual(market_message.count("## 🧠 Trading Focus"), 1)
         self.assertEqual(market_message.count("## 🎥 Live Today"), 1)
         self.assertNotIn("## 🧠 Trading Focus", earnings_message)
@@ -314,7 +330,7 @@ class MorningBriefRoutingTests(unittest.TestCase):
 
         self.assertEqual(
             hashlib.sha256(market_message.encode("utf-8")).hexdigest(),
-            "6bcfcf98c2d53a1acdd1211d2e7839dad3df8fef2aa704bdfe1130a2619e05f9",
+            "8769c2bc776b56cd983467d2e3fd375cc1a75bd704b20985514320a5e4ebbebb",
         )
         self.assertEqual(
             hashlib.sha256(earnings_message.encode("utf-8")).hexdigest(),
@@ -442,10 +458,10 @@ class MorningBriefRoutingTests(unittest.TestCase):
             message.index("## 💰 Key Markets"),
         )
 
-    def test_futures_and_key_markets_use_approved_sources_and_labels(self):
+    def test_futures_crypto_and_key_markets_use_approved_sources_and_labels(self):
         yahoo_quotes = [
             {"price": 100.0 + index, "percent_change": float(index)}
-            for index in range(7)
+            for index in range(8)
         ]
         with patch.object(
             morning_brief,
@@ -457,6 +473,7 @@ class MorningBriefRoutingTests(unittest.TestCase):
             return_value={"price": 65000.0, "percent_change": 1.0},
         ) as finnhub:
             futures = morning_brief.get_market_snapshot()
+            crypto_markets = morning_brief.get_crypto_markets()
             key_markets = morning_brief.get_key_markets()
 
         self.assertEqual(
@@ -464,14 +481,32 @@ class MorningBriefRoutingTests(unittest.TestCase):
             ["ES", "NQ", "YM", "RTY"],
         )
         self.assertEqual(
+            [item["symbol"] for item in crypto_markets],
+            ["BTC", "ETH", "XRP"],
+        )
+        self.assertEqual(
             [item["symbol"] for item in key_markets],
-            ["BTC", "GC", "CL", "DXY"],
+            ["GC", "SI", "CL", "DXY"],
         )
         self.assertEqual(
             [call.args[0] for call in yahoo.call_args_list],
-            ["ES=F", "NQ=F", "YM=F", "RTY=F", "GC=F", "CL=F", "DX-Y.NYB"],
+            [
+                "ES=F",
+                "NQ=F",
+                "YM=F",
+                "RTY=F",
+                "GC=F",
+                "SI=F",
+                "CL=F",
+                "DX-Y.NYB",
+            ],
         )
-        finnhub.assert_called_once_with("BINANCE:BTCUSDT")
+        self.assertEqual(
+            [market_call.args[0] for market_call in finnhub.call_args_list],
+            ["BINANCE:BTCUSDT", "BINANCE:ETHUSDT", "BINANCE:XRPUSDT"],
+        )
+
+        self.assertEqual(morning_brief.format_price(1.82, True), "$1.82")
 
     def test_morning_read_is_first_section_and_summarizes_leaders(self):
         futures = [

@@ -22,11 +22,12 @@ def quote(price, change):
     }
 
 
-def item(symbol, name, price, change, *, is_crypto=False):
+def item(symbol, name, price, change, *, is_crypto=False, price_prefix="$"):
     return {
         "symbol": symbol,
         "name": name,
         "is_crypto": is_crypto,
+        "price_prefix": price_prefix,
         "quote": quote(price, change),
     }
 
@@ -70,19 +71,21 @@ class WindowsConsole:
 class MarketWrapTests(unittest.TestCase):
     def setUp(self):
         self.market = [
-            item("SPY", "S&P 500 ETF", 700.0, 1.0),
-            item("QQQ", "Nasdaq-100 ETF", 600.0, 1.5),
-            item("DIA", "Dow ETF", 500.0, 0.4),
-            item("IWM", "Russell 2000 ETF", 250.0, -0.2),
+            item("ES", "S&P 500 Futures", 7000.0, 1.0, price_prefix=""),
+            item("NQ", "Nasdaq-100 Futures", 25000.0, 1.5, price_prefix=""),
+            item("YM", "Dow Futures", 50000.0, 0.4, price_prefix=""),
+            item("RTY", "Russell 2000 Futures", 2500.0, -0.2, price_prefix=""),
         ]
         self.crypto = [
             item("BTC", "Bitcoin", 100000.0, 2.5, is_crypto=True),
             item("ETH", "Ethereum", 5000.0, -1.0, is_crypto=True),
+            item("XRP", "XRP", 3.0, 0.5, is_crypto=True),
         ]
         self.cross_market = [
-            item("GLD", "Gold ETF", 300.0, 0.8),
-            item("USO", "Oil ETF", 80.0, -0.5),
-            item("UUP", "U.S. Dollar ETF", 30.0, 0.1),
+            item("GC", "🥇 Gold Futures", 4400.0, 0.8),
+            item("SI", "🥈 Silver Futures", 80.0, 1.2),
+            item("CL", "🛢️ Crude Oil Futures", 84.0, -0.5),
+            item("DXY", "💵 U.S. Dollar Index", 100.0, 0.1, price_prefix=""),
         ]
         self.global_markets = [
             item("Nikkei 225", "Nikkei 225", 42000.0, 0.8),
@@ -130,12 +133,12 @@ class MarketWrapTests(unittest.TestCase):
         self.assertNotIn("fields", embed)
         self.assertIn("Monday, August 10, 2026", description)
         headings = [
-            "📈 U.S. Market Close",
-            "🌍 Global Markets",
+            "🌆 Session Read",
             "📅 High-Impact Economic Results",
-            "₿ Crypto Snapshot",
-            "🌐 Key Markets",
-            "🧠 Session Read",
+            "📉 U.S. Futures Close",
+            "🌍 Global Markets",
+            "₿ Crypto Markets",
+            "💰 Key Markets",
             "🔭 Next Session",
         ]
         self.assertEqual(
@@ -143,7 +146,7 @@ class MarketWrapTests(unittest.TestCase):
             sorted(description.index(f"## {heading}") for heading in headings),
         )
         self.assertTrue(all(f"\n\n## {heading}\n" in description for heading in headings))
-        self.assertIn("**SPY — S&P 500 ETF:** $700.00 (+1.00%)", description)
+        self.assertIn("**ES — S&P 500 Futures:** 7,000.00 (+1.00%)", description)
         self.assertIn("▲ **Nikkei 225:** 42,000.00 (+0.80%)", description)
         self.assertIn("▼ **Hang Seng:** 25,000.00 (-0.40%)", description)
         self.assertIn("**8:30 AM — CPI m/m**", description)
@@ -151,7 +154,10 @@ class MarketWrapTests(unittest.TestCase):
         self.assertIn("Forecast: **0.3%**", description)
         self.assertIn("Previous: **0.1%**", description)
         self.assertIn("**BTC — Bitcoin:** $100,000 (+2.50%)", description)
-        self.assertIn("**GLD — Gold ETF:** $300.00 (+0.80%)", description)
+        self.assertIn("**XRP — XRP:** $3.00 (+0.50%)", description)
+        self.assertIn("**GC — 🥇 Gold Futures:** $4,400.00 (+0.80%)", description)
+        self.assertIn("**SI — 🥈 Silver Futures:** $80.00 (+1.20%)", description)
+        self.assertGreaterEqual(description.count("━━━━━━━━━━━━━━━━━━━━━━━━━━━━"), 8)
 
     def test_quiet_day_omits_economic_results_section(self):
         payload = market_wrap.build_market_wrap_payload(
@@ -188,7 +194,7 @@ class MarketWrapTests(unittest.TestCase):
     def test_session_read_is_deterministic(self):
         self.assertEqual(
             market_wrap.session_read(self.market),
-            "Broadly positive U.S. close across the major index ETFs.",
+            "Broadly positive U.S. close across the major index futures.",
         )
 
         negative = [
@@ -199,7 +205,7 @@ class MarketWrapTests(unittest.TestCase):
         ]
         self.assertEqual(
             market_wrap.session_read(negative),
-            "Broadly negative U.S. close across the major index ETFs.",
+            "Broadly negative U.S. close across the major index futures.",
         )
 
     def test_unavailable_quotes_are_rendered_without_failure(self):
@@ -335,7 +341,9 @@ class MarketWrapTests(unittest.TestCase):
         self.assertEqual(len(send.call_args.args[1]["embeds"]), 1)
 
     def test_named_quote_fetch_preserves_display_symbols(self):
-        get_quote = Mock(side_effect=[quote(100000, 1), quote(5000, 2)])
+        get_quote = Mock(
+            side_effect=[quote(100000, 1), quote(5000, 2), quote(3, 3)]
+        )
 
         with patch.object(market_wrap.morning_brief, "get_quote", get_quote):
             results = market_wrap.get_crypto_snapshot()
@@ -345,9 +353,13 @@ class MarketWrapTests(unittest.TestCase):
             [
                 unittest.mock.call("BINANCE:BTCUSDT"),
                 unittest.mock.call("BINANCE:ETHUSDT"),
+                unittest.mock.call("BINANCE:XRPUSDT"),
             ],
         )
-        self.assertEqual([result["symbol"] for result in results], ["BTC", "ETH"])
+        self.assertEqual(
+            [result["symbol"] for result in results],
+            ["BTC", "ETH", "XRP"],
+        )
         self.assertTrue(all(result["is_crypto"] for result in results))
 
     def test_global_snapshot_fetches_each_named_index_once(self):
