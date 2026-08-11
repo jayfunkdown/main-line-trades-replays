@@ -342,6 +342,29 @@ PRIORITY_TICKERS = {
 }
 
 
+# Five-star names tend to be the most market-moving earnings reports.
+# Three-star names are major sector leaders. Every other ticker in the
+# established priority list remains a four-star active-trading watchlist name.
+FIVE_STAR_EARNINGS_TICKERS = {
+    "AAPL", "AMD", "AMZN", "AVGO", "BA", "BABA", "BAC", "COIN",
+    "COST", "CRM", "CVX", "DDOG", "DIS", "GOOG", "GOOGL", "GS",
+    "HD", "JPM", "LLY", "META", "MSFT", "MSTR", "NFLX", "NVDA",
+    "ORCL", "PLTR", "QCOM", "TSLA", "TSM", "UNH", "WMT", "XOM",
+}
+
+THREE_STAR_EARNINGS_TICKERS = {
+    "ABBV", "ABT", "BLK", "CAT", "DE", "FDX", "GE", "IBM", "JNJ",
+    "MA", "MCD", "MS", "PFE", "V",
+}
+
+EARNINGS_PRIORITY_GUIDE = [
+    "🔥 **Priority guide:**",
+    "⭐⭐⭐⭐⭐ High impact",
+    "⭐⭐⭐⭐ Active trading watchlist",
+    "⭐⭐⭐ Major sector leader",
+]
+
+
 MARKET_SYMBOLS = [
     ("ES=F", "ES", "S&P 500 Futures"),
     ("NQ=F", "NQ", "Nasdaq-100 Futures"),
@@ -801,6 +824,7 @@ def get_all_earnings():
                 "priority": (
                     symbol in PRIORITY_TICKERS
                 ),
+                "priority_stars": earnings_priority_stars(symbol),
             }
         )
 
@@ -824,6 +848,10 @@ def group_earnings(earnings):
         groups[key].sort(
             key=lambda item: (
                 not item["priority"],
+                -item.get(
+                    "priority_stars",
+                    earnings_priority_stars(item["symbol"]),
+                ),
                 item["symbol"],
             )
         )
@@ -831,14 +859,28 @@ def group_earnings(earnings):
     return groups
 
 
+def earnings_priority_stars(symbol):
+    if symbol in FIVE_STAR_EARNINGS_TICKERS:
+        return 5
+    if symbol in THREE_STAR_EARNINGS_TICKERS:
+        return 3
+    if symbol in PRIORITY_TICKERS:
+        return 4
+    return 0
+
+
 def format_featured_earning(report):
     symbol = report["symbol"]
     name = report["name"]
+    stars = "⭐" * report.get(
+        "priority_stars",
+        earnings_priority_stars(symbol),
+    )
 
     if name:
-        return f"• **{symbol}** — {name}"
+        return f"{stars} **{symbol}** — {name}"
 
-    return f"• **{symbol}**"
+    return f"{stars} **{symbol}**"
 
 
 def compact_ticker_lines(
@@ -1156,6 +1198,10 @@ def build_earnings_message(earnings):
             "U.S. earnings report"
             f"{'' if len(earnings) == 1 else 's'} today.**"
         ),
+        "",
+        *EARNINGS_PRIORITY_GUIDE,
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         "",
     ]
 

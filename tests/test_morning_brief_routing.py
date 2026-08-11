@@ -304,6 +304,10 @@ class MorningBriefRoutingTests(unittest.TestCase):
         self.assertNotIn("## 🧠 Trading Focus", earnings_message)
         self.assertNotIn("## 🎥 Live Today", earnings_message)
         self.assertNotIn("## 🌍 Global Markets", earnings_message)
+        self.assertEqual(earnings_message.count("🔥 **Priority guide:**"), 1)
+        self.assertIn("⭐⭐⭐⭐⭐ High impact", earnings_message)
+        self.assertIn("⭐⭐⭐⭐ Active trading watchlist", earnings_message)
+        self.assertIn("⭐⭐⭐ Major sector leader", earnings_message)
         self.assertIn("**8:30 AM Eastern**", market_message)
         self.assertIn("**📢︱announcements**", market_message)
         self.assertTrue(earnings_message.endswith("━━━━━━━━━━━━━━━━━━━━━━━━━━━━"))
@@ -314,7 +318,24 @@ class MorningBriefRoutingTests(unittest.TestCase):
         )
         self.assertEqual(
             hashlib.sha256(earnings_message.encode("utf-8")).hexdigest(),
-            "109988dce4249a21afea9235039a43f282d7c704a621ea502ce696fc51cd307a",
+            "e1bf470d0ae79cfe061fe3b4dfb3d7b5a03033fc5e5b450ad1c0fc0e645e26f4",
+        )
+
+    def test_earnings_priority_guide_and_star_tiers_are_visible(self):
+        earnings = [
+            {"symbol": "DDOG", "name": "Datadog", "hour": "bmo", "priority": True},
+            {"symbol": "HIMS", "name": "Hims & Hers", "hour": "amc", "priority": True},
+            {"symbol": "JNJ", "name": "Johnson & Johnson", "hour": "amc", "priority": True},
+        ]
+
+        message = morning_brief.build_earnings_message(earnings)
+
+        self.assertIn("⭐⭐⭐⭐⭐ **DDOG** — Datadog", message)
+        self.assertIn("⭐⭐⭐⭐ **HIMS** — Hims & Hers", message)
+        self.assertIn("⭐⭐⭐ **JNJ** — Johnson & Johnson", message)
+        self.assertLess(
+            message.index("🔥 **Priority guide:**"),
+            message.index("## 🔔 Before Market Open"),
         )
 
     def test_global_snapshot_fetches_each_named_index_once(self):
