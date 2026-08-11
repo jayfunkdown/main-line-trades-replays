@@ -3376,12 +3376,34 @@ async def run_review_button_bot() -> None:
                 default=record.get("timeframe"),
                 custom_id="manual_signal_timeframe",
             )
-            self.setup_name = discord.ui.TextInput(
-                required=False,
-                max_length=100,
-                default=record.get("setup_name"),
-                custom_id="manual_signal_setup",
-            )
+            self.trade_direction = None
+            self.setup_name = None
+            if self.is_edit:
+                self.setup_name = discord.ui.TextInput(
+                    required=False,
+                    max_length=100,
+                    default=record.get("setup_name"),
+                    custom_id="manual_signal_setup",
+                )
+            else:
+                self.trade_direction = discord.ui.Select(
+                    custom_id="manual_signal_create_direction",
+                    placeholder="Select Long or Short",
+                    min_values=1,
+                    max_values=1,
+                    options=[
+                        discord.SelectOption(
+                            label="Long",
+                            value=TRADE_DIRECTION_LONG,
+                            emoji="🟢",
+                        ),
+                        discord.SelectOption(
+                            label="Short",
+                            value=TRADE_DIRECTION_SHORT,
+                            emoji="🔴",
+                        ),
+                    ],
+                )
             self.trade_thesis = discord.ui.TextInput(
                 style=discord.TextStyle.paragraph,
                 required=True,
@@ -3395,12 +3417,14 @@ async def run_review_button_bot() -> None:
                 min_values=0 if self.is_edit else 1,
                 max_values=1,
             )
-            for label, item in (
-                ("Instrument or symbol", self.instrument),
-                ("Timeframe (optional)", self.timeframe),
-                ("Setup name (optional)", self.setup_name),
-                ("Trade thesis", self.trade_thesis),
-            ):
+            fields = [("Instrument or symbol", self.instrument)]
+            if self.trade_direction is not None:
+                fields.append(("Trade direction", self.trade_direction))
+            fields.append(("Timeframe (optional)", self.timeframe))
+            if self.setup_name is not None:
+                fields.append(("Setup name (optional)", self.setup_name))
+            fields.append(("Trade thesis", self.trade_thesis))
+            for label, item in fields:
                 self.add_item(discord.ui.Label(text=label, component=item))
             self.add_item(
                 discord.ui.Label(
@@ -3431,8 +3455,20 @@ async def run_review_button_bot() -> None:
                 str(self.instrument.value).strip(),
                 str(self.trade_thesis.value).strip(),
                 str(self.timeframe.value or "").strip(),
-                str(self.setup_name.value or "").strip(),
+                (
+                    str(self.setup_name.value or "").strip()
+                    if self.setup_name is not None
+                    else ""
+                ),
             )
+
+        def selected_direction(self) -> str | None:
+            if self.trade_direction is None:
+                return None
+            values = list(self.trade_direction.values)
+            if len(values) != 1:
+                return None
+            return normalized_trade_direction(values[0])
 
         async def _submit_new(self, interaction: Any) -> None:
             if (
@@ -3450,6 +3486,13 @@ async def run_review_button_bot() -> None:
                 )
                 return
             instrument, thesis, timeframe, setup_name = self.fields()
+            trade_direction = self.selected_direction()
+            if trade_direction is None:
+                await send_ephemeral_rejection(
+                    interaction,
+                    "Select Long or Short before creating this signal.",
+                )
+                return
             if not is_valid_manual_signal_fields(
                 instrument, thesis, timeframe, setup_name
             ):
@@ -3476,7 +3519,7 @@ async def run_review_button_bot() -> None:
                 content = build_manual_signal_message(
                     instrument,
                     thesis,
-                    trade_direction=None,
+                    trade_direction=trade_direction,
                     timeframe=timeframe,
                     setup_name=setup_name,
                 )
@@ -3522,7 +3565,7 @@ async def run_review_button_bot() -> None:
                 "creator_user_id": str(interaction.user.id),
                 "instrument": instrument,
                 "trade_thesis": thesis,
-                "trade_direction": None,
+                "trade_direction": trade_direction,
                 "timeframe": timeframe,
                 "setup_name": setup_name,
                 "chart": manual_chart_metadata(stored_attachment),
