@@ -287,6 +287,7 @@ class SendToSignalsRaceAndProvenanceTests(unittest.IsolatedAsyncioTestCase):
                     "review_message_id": "321",
                     "review_channel_id": "200",
                     "sent_to_signals": sent,
+                    "trade_direction": "long",
                     "candidate": {
                         "symbol": "ACME",
                         "move_percent": 10.0,
@@ -373,6 +374,7 @@ class SendToSignalsRaceAndProvenanceTests(unittest.IsolatedAsyncioTestCase):
             channel_id=channel_id,
         )
         self.assertIsNotNone(modal)
+        modal.trade_direction._values = ["long"]
         modal.trade_thesis._value = "Trade above resistance."
         modal.trade_chart._values = [
             attachment

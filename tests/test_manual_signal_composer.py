@@ -64,16 +64,33 @@ class ComposerClient:
 
 
 class ManualSignalPureBehaviorTests(unittest.TestCase):
+    def test_trade_direction_is_explicit_and_never_inferred(self):
+        self.assertEqual(
+            earnings_reactions.normalized_trade_direction(" LONG "),
+            "long",
+        )
+        self.assertEqual(
+            earnings_reactions.normalized_trade_direction("Short"),
+            "short",
+        )
+        for value in (None, "", "buy", "sell", True):
+            with self.subTest(value=value):
+                self.assertIsNone(
+                    earnings_reactions.normalized_trade_direction(value)
+                )
+
     def test_exact_format_with_optional_fields(self):
         self.assertEqual(
             earnings_reactions.build_manual_signal_message(
                 "ES futures",
                 "Hold above VWAP.",
+                trade_direction="long",
                 timeframe="15m",
                 setup_name="Opening drive",
             ),
             "# 📈 Trade Signal\n\n"
             "## ES futures\n\n"
+            "🟢 **Direction:** Long\n\n"
             "🕒 **Timeframe:** 15m\n"
             "🎯 **Setup:** Opening drive\n\n"
             "## 🧠 Trade Thesis\n\n"
@@ -85,8 +102,9 @@ class ManualSignalPureBehaviorTests(unittest.TestCase):
 
     def test_exact_format_omits_blank_optional_fields(self):
         content = earnings_reactions.build_manual_signal_message(
-            "BTC/USD", "Breakout retest."
+            "BTC/USD", "Breakout retest.", trade_direction="short"
         )
+        self.assertIn("🔴 **Direction:** Short", content)
         self.assertNotIn("Timeframe", content)
         self.assertNotIn("Setup:", content)
         self.assertIn("## BTC/USD", content)
@@ -176,6 +194,7 @@ class ManualSignalStateTests(unittest.TestCase):
             "creator_user_id": "1",
             "instrument": "ES",
             "trade_thesis": "Hold above VWAP.",
+            "trade_direction": "long",
             "timeframe": "15m",
             "setup_name": "Breakout",
             "chart": {
@@ -234,6 +253,20 @@ class ManualSignalStateTests(unittest.TestCase):
                 "draft", "400", "300", "attempt", "2026-08-08T10:01:00+00:00"
             )
         self.assertEqual(outcome, "canceled")
+
+    def test_publish_claim_requires_an_explicit_direction(self):
+        self.state["manual_signal_drafts"]["draft"]["trade_direction"] = None
+        with patch.object(
+            earnings_reactions, "update_state", side_effect=self.transactional_update
+        ):
+            _state, outcome = earnings_reactions.claim_manual_signal_delivery(
+                "draft", "400", "300", "attempt", "2026-08-08T10:01:00+00:00"
+            )
+        self.assertEqual(outcome, "direction_required")
+        self.assertEqual(
+            self.state["manual_signal_drafts"]["draft"]["delivery_status"],
+            "ready",
+        )
 
 
 class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
@@ -423,6 +456,7 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 "description": earnings_reactions.build_manual_signal_message(
                     "EUR/USD",
                     "Hold the breakout.",
+                    trade_direction=None,
                     timeframe="4h",
                     setup_name="Retest",
                 ),
@@ -435,6 +469,40 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
         record = next(iter(self.state["manual_signal_drafts"].values()))
         self.assertEqual(record["draft_message_id"], "400")
         self.assertEqual(record["delivery_status"], "ready")
+        self.assertIsNone(record["trade_direction"])
+
+    async def test_direction_selector_persists_and_updates_the_draft_card(self):
+        client, _tree, view = await self.start_bot()
+        attachment = self.attachment()
+        message = SimpleNamespace(
+            id=400,
+            author=client.user,
+            channel=SimpleNamespace(id=300),
+            type=discord.MessageType.default,
+            attachments=[attachment],
+            edit=AsyncMock(),
+        )
+        self.draft_record(trade_direction=None)
+        interaction = self.interaction(client, message=message)
+        selector = self.button(view, "manual_signal_direction")
+        selector._values = ["short"]
+        with patch.object(
+            earnings_reactions,
+            "load_state",
+            side_effect=lambda: copy.deepcopy(self.state),
+        ), patch.object(
+            earnings_reactions,
+            "update_state",
+            side_effect=self.transactional_update,
+        ):
+            await selector.callback(interaction)
+        self.assertEqual(
+            self.state["manual_signal_drafts"]["draft"]["trade_direction"],
+            "short",
+        )
+        description = message.edit.await_args.kwargs["embed"].description
+        self.assertIn("🔴 **Direction:** Short", description)
+        self.signals.send.assert_not_awaited()
 
     async def test_edit_retains_or_replaces_chart_and_cancel_deletes(self):
         client, _tree, view = await self.start_bot()
@@ -585,9 +653,14 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 self.button(view, "manual_signal_publish").callback(two),
             )
         self.signals.send.assert_awaited_once()
+        self.assertIn(
+            "🟢 **Direction:** Long",
+            self.signals.send.await_args.kwargs["embed"].description,
+        )
         record = self.state["manual_signal_drafts"]["draft"]
         self.assertEqual(record["delivery_status"], "sent")
         self.assertEqual(record["signals_message_id"], "600")
+        self.assertEqual(record["trade_direction"], "long")
         message.delete.assert_awaited_once()
         message.edit.assert_not_awaited()
         log_message = self.bot_log.send.await_args.args[0]

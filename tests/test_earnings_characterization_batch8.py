@@ -479,6 +479,7 @@ class ReviewModalBoundaryTests(unittest.IsolatedAsyncioTestCase):
             "review_message_id": "321",
             "review_channel_id": "200",
             "sent_to_signals": False,
+            "trade_direction": "long",
             "candidate": {
                 "symbol": "ACME",
                 "eps_direction": "beat",
@@ -548,6 +549,7 @@ class ReviewModalBoundaryTests(unittest.IsolatedAsyncioTestCase):
         ), redirect_stdout(StringIO()):
             await client.persistent_view.children[0].callback(button_interaction)
 
+        captured.modal.trade_direction._values = ["long"]
         captured.modal.trade_thesis._value = "Trade above resistance."
         captured.modal.trade_chart._values = [attachment]
         return captured.modal, signals_channel, reviewer, guild
@@ -669,6 +671,7 @@ class ReviewModalBoundaryTests(unittest.IsolatedAsyncioTestCase):
             "review_message_id": "321",
             "review_channel_id": "200",
             "sent_to_signals": False,
+            "trade_direction": "long",
             "candidate": {
                 "symbol": "ACME",
                 "eps_direction": "beat",
