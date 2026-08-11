@@ -2357,6 +2357,7 @@ def update_manual_signal_draft(
     *,
     instrument: str,
     trade_thesis: str,
+    trade_direction: str,
     timeframe: str,
     setup_name: str,
     chart: dict[str, str] | None,
@@ -2381,12 +2382,13 @@ def update_manual_signal_draft(
         ) != MANUAL_SIGNAL_READY:
             outcome = "unavailable"
             return
+        normalized_direction = normalized_trade_direction(trade_direction)
         if not is_valid_manual_signal_fields(
             instrument,
             trade_thesis,
             timeframe,
             setup_name,
-        ):
+        ) or normalized_direction is None:
             outcome = "invalid"
             return
         if chart is not None and not is_valid_manual_chart_metadata(chart):
@@ -2396,6 +2398,7 @@ def update_manual_signal_draft(
             {
                 "instrument": instrument.strip(),
                 "trade_thesis": trade_thesis.strip(),
+                "trade_direction": normalized_direction,
                 "timeframe": timeframe.strip(),
                 "setup_name": setup_name.strip(),
                 "updated_at": updated_at,
@@ -3376,34 +3379,31 @@ async def run_review_button_bot() -> None:
                 default=record.get("timeframe"),
                 custom_id="manual_signal_timeframe",
             )
-            self.trade_direction = None
+            current_direction = normalized_trade_direction(
+                record.get("trade_direction")
+            )
+            self.initial_direction = current_direction
+            self.trade_direction = discord.ui.Select(
+                custom_id="manual_signal_create_direction",
+                placeholder="Select Long or Short",
+                min_values=1,
+                max_values=1,
+                options=[
+                    discord.SelectOption(
+                        label="Long",
+                        value=TRADE_DIRECTION_LONG,
+                        emoji="🟢",
+                        default=current_direction == TRADE_DIRECTION_LONG,
+                    ),
+                    discord.SelectOption(
+                        label="Short",
+                        value=TRADE_DIRECTION_SHORT,
+                        emoji="🔴",
+                        default=current_direction == TRADE_DIRECTION_SHORT,
+                    ),
+                ],
+            )
             self.setup_name = None
-            if self.is_edit:
-                self.setup_name = discord.ui.TextInput(
-                    required=False,
-                    max_length=100,
-                    default=record.get("setup_name"),
-                    custom_id="manual_signal_setup",
-                )
-            else:
-                self.trade_direction = discord.ui.Select(
-                    custom_id="manual_signal_create_direction",
-                    placeholder="Select Long or Short",
-                    min_values=1,
-                    max_values=1,
-                    options=[
-                        discord.SelectOption(
-                            label="Long",
-                            value=TRADE_DIRECTION_LONG,
-                            emoji="🟢",
-                        ),
-                        discord.SelectOption(
-                            label="Short",
-                            value=TRADE_DIRECTION_SHORT,
-                            emoji="🔴",
-                        ),
-                    ],
-                )
             self.trade_thesis = discord.ui.TextInput(
                 style=discord.TextStyle.paragraph,
                 required=True,
@@ -3418,8 +3418,7 @@ async def run_review_button_bot() -> None:
                 max_values=1,
             )
             fields = [("Instrument or symbol", self.instrument)]
-            if self.trade_direction is not None:
-                fields.append(("Trade direction", self.trade_direction))
+            fields.append(("Trade direction", self.trade_direction))
             fields.append(("Timeframe (optional)", self.timeframe))
             if self.setup_name is not None:
                 fields.append(("Setup name (optional)", self.setup_name))
@@ -3463,12 +3462,12 @@ async def run_review_button_bot() -> None:
             )
 
         def selected_direction(self) -> str | None:
-            if self.trade_direction is None:
-                return None
             values = list(self.trade_direction.values)
-            if len(values) != 1:
-                return None
-            return normalized_trade_direction(values[0])
+            if len(values) == 1:
+                return normalized_trade_direction(values[0])
+            if self.is_edit:
+                return self.initial_direction
+            return None
 
         async def _submit_new(self, interaction: Any) -> None:
             if (
@@ -3615,6 +3614,14 @@ async def run_review_button_bot() -> None:
                 )
                 return
             instrument, thesis, timeframe, setup_name = self.fields()
+            trade_direction = self.selected_direction()
+            if trade_direction is None:
+                await send_ephemeral_rejection(
+                    interaction,
+                    "Select Long or Short before updating this signal.",
+                )
+                return
+            setup_name = record["setup_name"]
             if not is_valid_manual_signal_fields(
                 instrument, thesis, timeframe, setup_name
             ):
@@ -3636,7 +3643,7 @@ async def run_review_button_bot() -> None:
             content = build_manual_signal_message(
                 instrument,
                 thesis,
-                trade_direction=record.get("trade_direction"),
+                trade_direction=trade_direction,
                 timeframe=timeframe,
                 setup_name=setup_name,
             )
@@ -3693,6 +3700,7 @@ async def run_review_button_bot() -> None:
                     record["draft_channel_id"],
                     instrument=instrument,
                     trade_thesis=thesis,
+                    trade_direction=trade_direction,
                     timeframe=timeframe,
                     setup_name=setup_name,
                     chart=chart,
@@ -3721,98 +3729,11 @@ async def run_review_button_bot() -> None:
         def __init__(self):
             super().__init__(timeout=None)
 
-        @discord.ui.select(
-            custom_id="manual_signal_direction",
-            placeholder="Select Long or Short (required)",
-            min_values=1,
-            max_values=1,
-            row=0,
-            options=[
-                discord.SelectOption(
-                    label="Long",
-                    value=TRADE_DIRECTION_LONG,
-                    emoji="🟢",
-                ),
-                discord.SelectOption(
-                    label="Short",
-                    value=TRADE_DIRECTION_SHORT,
-                    emoji="🔴",
-                ),
-            ],
-        )
-        async def direction(self, interaction, select):
-            message_id = str(
-                getattr(getattr(interaction, "message", None), "id", "")
-            )
-            async with manual_draft_locks.hold(message_id):
-                resolved = await resolve_manual_draft(
-                    interaction,
-                    require_creator=False,
-                )
-                if resolved is None:
-                    await send_ephemeral_rejection(
-                        interaction,
-                        "This signal draft is no longer available.",
-                    )
-                    return
-                draft_id, record, draft_message = resolved
-                direction = normalized_trade_direction(
-                    select.values[0] if len(select.values) == 1 else None
-                )
-                try:
-                    _state, outcome = set_manual_signal_direction(
-                        draft_id,
-                        record["draft_message_id"],
-                        record["draft_channel_id"],
-                        str(direction or ""),
-                        datetime.now(EASTERN).isoformat(),
-                    )
-                except (EarningsStateError, OSError):
-                    outcome = "persistence_failed"
-                if outcome != "updated":
-                    await send_ephemeral_rejection(
-                        interaction,
-                        "This signal direction could not be saved.",
-                    )
-                    return
-                try:
-                    await draft_message.edit(
-                        content=None,
-                        embed=build_bordered_discord_embed(
-                            discord,
-                            build_manual_signal_message(
-                                record["instrument"],
-                                record["trade_thesis"],
-                                trade_direction=direction,
-                                timeframe=record["timeframe"],
-                                setup_name=record["setup_name"],
-                            ),
-                            Path(record["chart"]["filename"]).name,
-                        ),
-                        view=ManualSignalDraftView(),
-                        allowed_mentions=discord.AllowedMentions.none(),
-                    )
-                except Exception:
-                    await write_manual_signal_log(
-                        record["instrument"],
-                        interaction.user,
-                        "direction saved but draft preview update failed",
-                    )
-                    await send_ephemeral_rejection(
-                        interaction,
-                        "Direction saved, but the draft preview could not be updated.",
-                    )
-                    return
-                await send_ephemeral_rejection(
-                    interaction,
-                    f"Direction set to {direction.title()}.",
-                )
-
         @discord.ui.button(
             label="Publish",
             style=discord.ButtonStyle.success,
             custom_id="manual_signal_publish",
-            row=1,
+            row=0,
         )
         async def publish(self, interaction, button):
             message_id = str(getattr(getattr(interaction, "message", None), "id", ""))
@@ -4090,7 +4011,7 @@ async def run_review_button_bot() -> None:
             label="Edit",
             style=discord.ButtonStyle.primary,
             custom_id="manual_signal_edit",
-            row=1,
+            row=0,
         )
         async def edit(self, interaction, button):
             resolved = await resolve_manual_draft(
@@ -4128,7 +4049,7 @@ async def run_review_button_bot() -> None:
             label="Cancel",
             style=discord.ButtonStyle.danger,
             custom_id="manual_signal_cancel",
-            row=1,
+            row=0,
         )
         async def cancel(self, interaction, button):
             message_id = str(getattr(getattr(interaction, "message", None), "id", ""))
