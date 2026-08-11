@@ -63,6 +63,7 @@ import asyncio
 import calendar
 import copy
 import hashlib
+import io
 import tempfile
 import json
 from numbers import Real
@@ -152,6 +153,11 @@ MANUAL_SIGNAL_IMAGE_TYPES = {
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
 }
+MANUAL_SIGNAL_DISCORD_CDN_HOSTS = {
+    "cdn.discordapp.com",
+    "media.discordapp.net",
+}
+MANUAL_SIGNAL_MAX_CHART_BYTES = 25 * 1024 * 1024
 
 FEED_DELIVERY_RESERVED = "reserved"
 FEED_DELIVERY_CONFIRMED = "confirmed"
@@ -2155,6 +2161,55 @@ def manual_chart_matches_record(attachment: Any, metadata: Any) -> bool:
     )
 
 
+def manual_chart_embed_url(message: Any, metadata: Any) -> str | None:
+    if not is_valid_manual_chart_metadata(metadata):
+        return None
+    expected_filename = Path(metadata["filename"]).name
+    for embed in list(getattr(message, "embeds", []) or []):
+        image = getattr(embed, "image", None)
+        url = getattr(image, "url", None)
+        if not isinstance(url, str) or not url:
+            continue
+        parsed = urllib.parse.urlparse(url)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname not in MANUAL_SIGNAL_DISCORD_CDN_HOSTS
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.port is not None
+            or not parsed.path.startswith("/attachments/")
+            or Path(urllib.parse.unquote(parsed.path)).name
+            != expected_filename
+        ):
+            continue
+        return url
+    return None
+
+
+def download_manual_chart_bytes(url: str) -> bytes:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": (
+                "MainLineTrades/1.0 "
+                "(+https://github.com/jayfunkdown/main-line-trades-replays)"
+            )
+        },
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        content_length = response.headers.get("Content-Length")
+        if (
+            isinstance(content_length, str)
+            and content_length.isdigit()
+            and int(content_length) > MANUAL_SIGNAL_MAX_CHART_BYTES
+        ):
+            raise ValueError("Manual signal chart is too large")
+        data = response.read(MANUAL_SIGNAL_MAX_CHART_BYTES + 1)
+    if not data or len(data) > MANUAL_SIGNAL_MAX_CHART_BYTES:
+        raise ValueError("Manual signal chart is empty or too large")
+    return data
+
+
 def manual_signal_delivery_status(record: Any) -> str | None:
     """Validate a complete manual draft and return its delivery state."""
     if not isinstance(record, dict):
@@ -3816,9 +3871,20 @@ async def run_review_button_bot() -> None:
                     await send_ephemeral_rejection(interaction, user_message)
 
                 attachments = list(getattr(draft_message, "attachments", []) or [])
-                if len(attachments) != 1 or not manual_chart_matches_record(
-                    attachments[0], record["chart"]
-                ):
+                attachment = (
+                    attachments[0]
+                    if len(attachments) == 1
+                    and manual_chart_matches_record(
+                        attachments[0], record["chart"]
+                    )
+                    else None
+                )
+                embed_chart_url = (
+                    manual_chart_embed_url(draft_message, record["chart"])
+                    if not attachments
+                    else None
+                )
+                if attachment is None and embed_chart_url is None:
                     await finish(
                         MANUAL_SIGNAL_READY,
                         "draft_chart_unavailable",
@@ -3846,9 +3912,19 @@ async def run_review_button_bot() -> None:
                     if signals_channel is None:
                         raise DefiniteDeliveryError("Signals channel unavailable")
                     chart_filename = Path(record["chart"]["filename"]).name
-                    chart_file = await attachments[0].to_file(
-                        filename=chart_filename
-                    )
+                    if attachment is not None:
+                        chart_file = await attachment.to_file(
+                            filename=chart_filename
+                        )
+                    else:
+                        chart_bytes = await asyncio.to_thread(
+                            download_manual_chart_bytes,
+                            str(embed_chart_url),
+                        )
+                        chart_file = discord.File(
+                            io.BytesIO(chart_bytes),
+                            filename=chart_filename,
+                        )
                 except asyncio.CancelledError:
                     state_persistence_failed = False
                     try:

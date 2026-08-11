@@ -166,6 +166,36 @@ class ManualSignalPureBehaviorTests(unittest.TestCase):
                 )
             )
 
+    def test_embedded_chart_url_must_be_a_matching_discord_attachment(self):
+        metadata = {
+            "filename": "chart.png",
+            "content_type": "image/png",
+            "attachment_id": "500",
+        }
+        valid_embed = discord.Embed()
+        valid_embed.set_image(
+            url="https://cdn.discordapp.com/attachments/300/500/chart.png"
+        )
+        self.assertEqual(
+            earnings_reactions.manual_chart_embed_url(
+                SimpleNamespace(embeds=[valid_embed]), metadata
+            ),
+            "https://cdn.discordapp.com/attachments/300/500/chart.png",
+        )
+        for url in (
+            "http://cdn.discordapp.com/attachments/300/500/chart.png",
+            "https://example.com/attachments/300/500/chart.png",
+            "https://cdn.discordapp.com/attachments/300/500/other.png",
+        ):
+            with self.subTest(url=url):
+                embed = discord.Embed()
+                embed.set_image(url=url)
+                self.assertIsNone(
+                    earnings_reactions.manual_chart_embed_url(
+                        SimpleNamespace(embeds=[embed]), metadata
+                    )
+                )
+
     def test_manual_signal_log_labels_are_safe_and_bounded(self):
         value = earnings_reactions.safe_manual_signal_log_value(
             "@everyone\n" + ("x" * 100)
@@ -701,6 +731,49 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("published successfully", log_message)
         self.assertNotIn("Hold above VWAP", log_message)
         self.assertNotIn("chart.png", log_message)
+
+    async def test_publish_uses_bot_owned_embedded_chart_when_attachment_list_is_empty(self):
+        client, _tree, view = await self.start_bot()
+        embed = discord.Embed()
+        embed.set_image(
+            url="https://cdn.discordapp.com/attachments/300/500/chart.png"
+        )
+        message = SimpleNamespace(
+            id=400,
+            author=client.user,
+            channel=SimpleNamespace(id=300),
+            type=discord.MessageType.default,
+            attachments=[],
+            embeds=[embed],
+            edit=AsyncMock(),
+            delete=AsyncMock(),
+        )
+        self.draft_record()
+        interaction = self.interaction(client, message=message)
+        with patch.object(
+            earnings_reactions,
+            "load_state",
+            side_effect=lambda: copy.deepcopy(self.state),
+        ), patch.object(
+            earnings_reactions,
+            "update_state",
+            side_effect=self.transactional_update,
+        ), patch.object(
+            earnings_reactions,
+            "download_manual_chart_bytes",
+            return_value=b"synthetic chart bytes",
+        ) as download:
+            await self.button(view, "manual_signal_publish").callback(interaction)
+
+        download.assert_called_once_with(
+            "https://cdn.discordapp.com/attachments/300/500/chart.png"
+        )
+        self.signals.send.assert_awaited_once()
+        self.assertEqual(
+            self.state["manual_signal_drafts"]["draft"]["delivery_status"],
+            "sent",
+        )
+        message.delete.assert_awaited_once()
 
     async def test_publish_treats_already_deleted_draft_as_success(self):
         client, _tree, view = await self.start_bot()
