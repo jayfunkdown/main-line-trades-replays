@@ -310,7 +310,7 @@ class MorningBriefRoutingTests(unittest.TestCase):
 
         self.assertEqual(
             hashlib.sha256(market_message.encode("utf-8")).hexdigest(),
-            "4e3cb6eacd4f0d8bff54081ffa7b3b2515152888e3df59a9127dd621defd46d0",
+            "6bcfcf98c2d53a1acdd1211d2e7839dad3df8fef2aa704bdfe1130a2619e05f9",
         )
         self.assertEqual(
             hashlib.sha256(earnings_message.encode("utf-8")).hexdigest(),
@@ -413,13 +413,98 @@ class MorningBriefRoutingTests(unittest.TestCase):
         self.assertIn("▲ **Nikkei 225:** 42,000.00 (+0.80%)", message)
         self.assertIn("• **Hang Seng:** Unavailable", message)
         self.assertLess(
-            message.index("## 📈 U.S. Market Snapshot"),
+            message.index("## 📈 U.S. Futures Snapshot"),
             message.index("## 🌍 Global Markets"),
         )
         self.assertLess(
             message.index("## 🌍 Global Markets"),
             message.index("## 💰 Key Markets"),
         )
+
+    def test_futures_and_key_markets_use_approved_sources_and_labels(self):
+        yahoo_quotes = [
+            {"price": 100.0 + index, "percent_change": float(index)}
+            for index in range(7)
+        ]
+        with patch.object(
+            morning_brief,
+            "get_yahoo_index_quote",
+            side_effect=yahoo_quotes,
+        ) as yahoo, patch.object(
+            morning_brief,
+            "get_quote",
+            return_value={"price": 65000.0, "percent_change": 1.0},
+        ) as finnhub:
+            futures = morning_brief.get_market_snapshot()
+            key_markets = morning_brief.get_key_markets()
+
+        self.assertEqual(
+            [item["symbol"] for item in futures],
+            ["ES", "NQ", "YM", "RTY"],
+        )
+        self.assertEqual(
+            [item["symbol"] for item in key_markets],
+            ["BTC", "GC", "CL", "DXY"],
+        )
+        self.assertEqual(
+            [call.args[0] for call in yahoo.call_args_list],
+            ["ES=F", "NQ=F", "YM=F", "RTY=F", "GC=F", "CL=F", "DX-Y.NYB"],
+        )
+        finnhub.assert_called_once_with("BINANCE:BTCUSDT")
+
+    def test_morning_read_is_first_section_and_summarizes_leaders(self):
+        futures = [
+            {
+                "symbol": "ES",
+                "name": "S&P 500 Futures",
+                "quote": {"price": 6400.0, "percent_change": 0.4},
+            },
+            {
+                "symbol": "NQ",
+                "name": "Nasdaq-100 Futures",
+                "quote": {"price": 23000.0, "percent_change": 0.8},
+            },
+            {
+                "symbol": "YM",
+                "name": "Dow Futures",
+                "quote": {"price": 44000.0, "percent_change": 0.2},
+            },
+            {
+                "symbol": "RTY",
+                "name": "Russell 2000 Futures",
+                "quote": {"price": 2200.0, "percent_change": 0.1},
+            },
+        ]
+        global_markets = [
+            {
+                "symbol": "^N225",
+                "name": "Nikkei 225",
+                "quote": {"price": 42000.0, "percent_change": -0.5},
+            },
+            {
+                "symbol": "^FTSE",
+                "name": "FTSE 100",
+                "quote": {"price": 9000.0, "percent_change": 0.1},
+            },
+        ]
+
+        with patch.object(morning_brief, "datetime", FixedDateTime), patch.object(
+            morning_brief.random,
+            "choice",
+            return_value=morning_brief.TRADING_QUOTES[0],
+        ):
+            message = morning_brief.build_market_message(
+                [], futures, global_markets, []
+            )
+
+        self.assertLess(
+            message.index("## 🌅 Morning Read"),
+            message.index("## 🚨 High-Impact USD Events"),
+        )
+        self.assertIn("U.S. equity futures are broadly higher", message)
+        self.assertIn("NQ is leading at +0.80%", message)
+        self.assertIn("Nikkei 225 is lagging at -0.50%", message)
+        self.assertIn("Market data captured at approximately 7:00 AM Eastern", message)
 
     def test_later_delivery_failure_preserves_sequential_order(self):
         failure = RuntimeError("synthetic later delivery failure")

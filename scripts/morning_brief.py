@@ -36,8 +36,8 @@ FINNHUB_API_KEY = os.environ["FINNHUB_API_KEY"].strip()
 
 EASTERN = ZoneInfo("America/New_York")
 
-DISCORD_MESSAGE_LIMIT = 2000
-SAFE_MESSAGE_LIMIT = 1900
+DISCORD_MESSAGE_LIMIT = 4096
+SAFE_MESSAGE_LIMIT = 3900
 
 MORNING_BRIEF_WEBHOOK_USERNAME = "Main Line Trades Morning Brief"
 EARNINGS_CALENDAR_WEBHOOK_USERNAME = "Main Line Trades Earnings Calendar"
@@ -343,18 +343,18 @@ PRIORITY_TICKERS = {
 
 
 MARKET_SYMBOLS = [
-    ("SPY", "S&P 500 ETF"),
-    ("QQQ", "Nasdaq-100 ETF"),
-    ("DIA", "Dow ETF"),
-    ("IWM", "Russell 2000 ETF"),
+    ("ES=F", "ES", "S&P 500 Futures"),
+    ("NQ=F", "NQ", "Nasdaq-100 Futures"),
+    ("YM=F", "YM", "Dow Futures"),
+    ("RTY=F", "RTY", "Russell 2000 Futures"),
 ]
 
 
 KEY_MARKETS = [
-    ("BINANCE:BTCUSDT", "₿ Bitcoin", True),
-    ("GLD", "🥇 Gold ETF", False),
-    ("USO", "🛢️ Oil ETF", False),
-    ("UUP", "💵 U.S. Dollar ETF", False),
+    ("BINANCE:BTCUSDT", "BTC", "₿ Bitcoin", "finnhub", True, "$"),
+    ("GC=F", "GC", "🥇 Gold Futures", "yahoo", False, "$"),
+    ("CL=F", "CL", "🛢️ Crude Oil Futures", "yahoo", False, "$"),
+    ("DX-Y.NYB", "DXY", "💵 U.S. Dollar Index", "yahoo", False, ""),
 ]
 
 
@@ -534,30 +534,37 @@ def get_quote(symbol):
 def get_market_snapshot():
     return [
         {
-            "symbol": symbol,
+            "symbol": display_symbol,
             "name": name,
-            "quote": get_quote(symbol),
+            "quote": get_yahoo_index_quote(source_symbol),
+            "price_prefix": "",
         }
-        for symbol, name in MARKET_SYMBOLS
+        for source_symbol, display_symbol, name in MARKET_SYMBOLS
     ]
 
 
 def get_key_markets():
     results = []
 
-    for symbol, name, is_crypto in KEY_MARKETS:
-        display_symbol = (
-            "BTC"
-            if symbol == "BINANCE:BTCUSDT"
-            else symbol
-        )
-
+    for (
+        source_symbol,
+        display_symbol,
+        name,
+        source,
+        is_crypto,
+        price_prefix,
+    ) in KEY_MARKETS:
         results.append(
             {
                 "symbol": display_symbol,
                 "name": name,
                 "is_crypto": is_crypto,
-                "quote": get_quote(symbol),
+                "price_prefix": price_prefix,
+                "quote": (
+                    get_quote(source_symbol)
+                    if source == "finnhub"
+                    else get_yahoo_index_quote(source_symbol)
+                ),
             }
         )
 
@@ -645,11 +652,11 @@ def direction_icon(percent_change):
     return "—"
 
 
-def format_price(price, is_crypto=False):
+def format_price(price, is_crypto=False, price_prefix="$"):
     if is_crypto:
-        return f"${price:,.0f}"
+        return f"{price_prefix}{price:,.0f}"
 
-    return f"${price:,.2f}"
+    return f"{price_prefix}{price:,.2f}"
 
 
 def quote_line(item):
@@ -672,6 +679,7 @@ def quote_line(item):
     price_text = format_price(
         quote["price"],
         item.get("is_crypto", False),
+        item.get("price_prefix", "$"),
     )
 
     return (
@@ -909,6 +917,69 @@ def build_earnings_group(
 # Message construction
 # ============================================================
 
+def market_breadth(items):
+    changes = [
+        item["quote"]["percent_change"]
+        for item in items
+        if item.get("quote")
+        and item["quote"].get("percent_change") is not None
+    ]
+    if not changes:
+        return "unavailable"
+
+    positive = sum(change > 0 for change in changes)
+    negative = sum(change < 0 for change in changes)
+    threshold = max(1, (len(changes) * 3 + 3) // 4)
+    if positive >= threshold:
+        return "broadly higher"
+    if negative >= threshold:
+        return "broadly lower"
+    return "mixed"
+
+
+def build_morning_read(market_snapshot, global_markets):
+    futures_read = market_breadth(market_snapshot)
+    global_read = market_breadth(global_markets)
+    first_sentence = (
+        f"U.S. equity futures are {futures_read}, while global markets "
+        f"are {global_read}."
+    )
+
+    available = [
+        (item, item["symbol"])
+        for item in market_snapshot
+        if item.get("quote")
+        and item["quote"].get("percent_change") is not None
+    ] + [
+        (item, item["name"])
+        for item in global_markets
+        if item.get("quote")
+        and item["quote"].get("percent_change") is not None
+    ]
+    if not available:
+        return first_sentence
+
+    leader = max(
+        available,
+        key=lambda entry: entry[0]["quote"]["percent_change"],
+    )
+    laggard = min(
+        available,
+        key=lambda entry: entry[0]["quote"]["percent_change"],
+    )
+    leader_item, leader_name = leader
+    laggard_item, laggard_name = laggard
+    return (
+        f"{first_sentence} {leader_name} is leading at "
+        f"{leader_item['quote']['percent_change']:+.2f}%, while "
+        f"{laggard_name} is lagging at "
+        f"{laggard_item['quote']['percent_change']:+.2f}%."
+    )
+
+
+def eastern_capture_time(value):
+    return value.strftime("%I:%M %p").lstrip("0")
+
 def build_market_message(
     events,
     market_snapshot,
@@ -921,6 +992,14 @@ def build_market_message(
         "# 🌅 Main Line Trades Morning Brief",
         "",
         f"📅 **{today.strftime('%A, %B %d, %Y')}**",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "",
+        "## 🌅 Morning Read",
+        "",
+        build_morning_read(market_snapshot, global_markets),
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         "",
         "## 🚨 High-Impact USD Events",
         "",
@@ -974,7 +1053,7 @@ def build_market_message(
         [
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
             "",
-            "## 📈 U.S. Market Snapshot",
+            "## 📈 U.S. Futures Snapshot",
             "",
         ]
     )
@@ -986,11 +1065,6 @@ def build_market_message(
 
     lines.extend(
         [
-            "",
-            (
-                "*ETF proxies shown; these "
-                "are not futures contracts.*"
-            ),
             "",
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
             "",
@@ -1058,7 +1132,11 @@ def build_market_message(
                 "and we'll see you live! 📈"
             ),
             "",
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            (
+                f"*🕒 Market data captured at approximately "
+                f"{eastern_capture_time(today)} Eastern. Futures and "
+                "global-market prices may be delayed.*"
+            ),
         ]
     )
 
