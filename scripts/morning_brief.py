@@ -360,7 +360,7 @@ THREE_STAR_EARNINGS_TICKERS = {
 EARNINGS_PRIORITY_GUIDE = [
     "🔥 **Priority guide:**",
     "⭐⭐⭐⭐⭐ High impact",
-    "⭐⭐⭐⭐ Active trading watchlist",
+    "⭐⭐⭐⭐ Actively Traded / High Volume",
     "⭐⭐⭐ Major sector leader",
 ]
 
