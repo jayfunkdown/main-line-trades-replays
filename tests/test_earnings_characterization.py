@@ -102,6 +102,7 @@ class EarningsStateTests(NoNetworkTestCase):
         "quotes": {},
         "signal_queue": {},
         "manual_signal_drafts": {},
+        "post_signal_reviews": {},
     }
 
     def load_from(self, path):
@@ -347,6 +348,7 @@ class DuplicatePostingTests(NoNetworkTestCase):
             "quotes": {},
             "signal_queue": {},
             "manual_signal_drafts": {},
+            "post_signal_reviews": {},
         }
 
     def test_saved_keys_suppress_both_private_and_public_posts(self):

@@ -62,6 +62,7 @@ class StateStoreValidationTests(unittest.TestCase):
             {"private": "bad"},
             {"signal_queue": None},
             {"manual_signal_drafts": []},
+            {"post_signal_reviews": []},
         )
 
         with tempfile.TemporaryDirectory() as temp_dir:
