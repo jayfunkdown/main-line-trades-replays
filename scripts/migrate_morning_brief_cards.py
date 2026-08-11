@@ -369,6 +369,11 @@ def build_parser():
     modes.add_argument("--dry-run", action="store_true")
     modes.add_argument("--apply", action="store_true")
     parser.add_argument("--through-message-id")
+    parser.add_argument(
+        "--webhook-env",
+        choices=("MORNING_BRIEF_WEBHOOK", "ECONOMIC_CALENDAR_WEBHOOK"),
+        default="MORNING_BRIEF_WEBHOOK",
+    )
     parser.add_argument("--expect-count", type=int)
     parser.add_argument("--confirm-channel-id")
     parser.add_argument("--state-path", type=Path)
@@ -380,7 +385,7 @@ def build_parser():
 def main():
     args = build_parser().parse_args()
     token = required_env("DISCORD_BOT_TOKEN")
-    webhook_url = required_env("MORNING_BRIEF_WEBHOOK")
+    webhook_url = required_env(args.webhook_env)
     metadata = webhook_metadata(webhook_url)
     channel_id = metadata["channel_id"]
     webhook_id = metadata["webhook_id"]
