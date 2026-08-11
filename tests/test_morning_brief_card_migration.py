@@ -3,6 +3,8 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 from unittest.mock import patch
 
 from scripts import migrate_morning_brief_cards as migration
@@ -39,6 +41,42 @@ def card_response(message, new_id="900"):
 
 
 class MorningBriefCardMigrationTests(unittest.TestCase):
+    def test_selected_webhook_environment_is_loaded(self):
+        args = SimpleNamespace(
+            audit=True,
+            dry_run=False,
+            apply=False,
+            webhook_env="ECONOMIC_CALENDAR_WEBHOOK",
+            through_message_id=None,
+            expect_count=None,
+            confirm_channel_id=None,
+            state_path=None,
+            backup_path=None,
+            limit=1,
+        )
+        parser = Mock()
+        parser.parse_args.return_value = args
+
+        with patch.object(
+            migration, "build_parser", return_value=parser
+        ), patch.object(
+            migration,
+            "required_env",
+            side_effect=["token", "economic-webhook"],
+        ) as required, patch.object(
+            migration,
+            "webhook_metadata",
+            return_value={"webhook_id": WEBHOOK_ID, "channel_id": CHANNEL_ID},
+        ), patch.object(
+            migration, "fetch_channel_history", return_value=[]
+        ), patch("builtins.print"):
+            migration.main()
+
+        self.assertEqual(
+            [call.args[0] for call in required.call_args_list],
+            ["DISCORD_BOT_TOKEN", "ECONOMIC_CALENDAR_WEBHOOK"],
+        )
+
     def test_audit_protects_other_and_pinned_messages(self):
         other = plain_message("101", webhook_id="other")
         pinned = plain_message("102", pinned=True)
