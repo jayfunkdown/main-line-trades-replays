@@ -43,6 +43,7 @@ VIDEO_INTEL_CHANNEL_HANDLES = (
     "@TheDiaryOfACEO",
     "@GrahamStephan",
     "@HeresyFinancial",
+    "@AndreiJikh",
 )
 
 DEFAULT_TITLE_PREFIX = "🔴 Live Trading"

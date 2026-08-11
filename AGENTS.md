@@ -230,7 +230,7 @@ timer runs never backfill an empty state.
 
     scripts/replay_to_discord.py --post --feed video-intel
 
-Watches the four approved external YouTube channels and publishes newly added
+Watches the five approved external YouTube channels and publishes newly added
 videos in the branded Video Intel card format.
 
 Production polling:
