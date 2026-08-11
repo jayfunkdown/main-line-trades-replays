@@ -71,15 +71,18 @@ class EarningsSignalMessageFormattingTests(unittest.TestCase):
         message = earnings_reactions.build_signal_message(
             self.candidate(),
             "Weekly continuation coming up",
+            "long",
         )
 
         self.assertTrue(message.startswith("# 📈 Trade Signal"))
+        self.assertIn("🟢 **Direction:** Long", message)
         self.assertNotIn(earnings_reactions.DIVIDER, message)
 
     def test_signal_divider_is_not_clumped_above_the_chart(self):
         message = earnings_reactions.build_signal_message(
             self.candidate(),
             "Weekly continuation coming up",
+            "short",
         )
 
         self.assertIn(
@@ -132,6 +135,7 @@ class EarningsReviewInteractionAuthorizationTests(
                     "review_message_id": message_id,
                     "review_channel_id": channel_id,
                     "sent_to_signals": False,
+                    "trade_direction": "long",
                     "candidate": {
                         "symbol": "ACME",
                         "move_percent": 10.0,
@@ -269,6 +273,7 @@ class EarningsReviewInteractionAuthorizationTests(
             content_type="image/png",
             to_file=AsyncMock(return_value="synthetic-discord-file"),
         )
+        modal.trade_direction._values = ["long"]
         modal.trade_thesis._value = "Trade above resistance."
         modal.trade_chart._values = [attachment]
         return modal, attachment
@@ -350,6 +355,7 @@ class EarningsReviewInteractionAuthorizationTests(
                         "description": earnings_reactions.build_signal_message(
                             state["signal_queue"]["token"]["candidate"],
                             "Trade above resistance.",
+                            "long",
                         ),
                         "color": 0xFF2BD6,
                         "image": {
@@ -369,6 +375,10 @@ class EarningsReviewInteractionAuthorizationTests(
                 self.assertEqual(
                     state["signal_queue"]["token"]["signals_message_id"],
                     "555",
+                )
+                self.assertEqual(
+                    state["signal_queue"]["token"]["trade_direction"],
+                    "long",
                 )
                 self.assertGreaterEqual(
                     review_channel.fetch_message.await_count,
@@ -679,6 +689,7 @@ class EarningsReviewInteractionAuthorizationTests(
         barrier = ConcurrentAttachmentBarrier()
         for modal in (modal_one, modal_two):
             self.assertIsNotNone(modal)
+            modal.trade_direction._values = ["long"]
             modal.trade_thesis._value = "Trade above resistance."
             modal.trade_chart._values = [barrier]
 
@@ -754,6 +765,61 @@ class EarningsReviewInteractionAuthorizationTests(
                 self.assertIsNone(modal)
                 self.assert_ephemeral_rejection(interaction)
                 signals_channel.send.assert_not_awaited()
+
+    async def test_direction_is_required_in_the_earnings_signal_form(self):
+        client, signals_channel, _review_channel = await self.start_bot()
+        state = self.signal_state()
+        state["signal_queue"]["token"].pop("trade_direction")
+
+        modal, _interaction = await self.click_button(
+            client,
+            user=self.user(1),
+            guild=self.guild(),
+            state=state,
+        )
+        self.assertIsNotNone(modal)
+        attachment = SimpleNamespace(
+            filename="chart.png",
+            content_type="image/png",
+            to_file=AsyncMock(return_value="synthetic-discord-file"),
+        )
+        modal.trade_thesis._value = "Trade below resistance."
+        modal.trade_chart._values = [attachment]
+        modal.trade_direction._values = []
+        submit = self.modal_interaction(self.user(1), self.guild())
+        with patch.object(
+            earnings_reactions,
+            "load_state",
+            return_value=state,
+        ), patch.object(
+            earnings_reactions,
+            "update_state",
+            side_effect=self.transactional_update(state),
+        ):
+            await modal.on_submit(submit)
+        attachment.to_file.assert_not_awaited()
+        signals_channel.send.assert_not_awaited()
+
+    async def test_modal_rejects_direction_missing_after_button_open(self):
+        reviewer = self.user(1)
+        client, signals_channel, _review_channel = await self.start_bot()
+        modal, attachment = await self.valid_modal(client, user=reviewer)
+        state = self.signal_state()
+        modal.trade_direction._values = []
+        interaction = self.modal_interaction(reviewer, self.guild())
+        with patch.object(
+            earnings_reactions,
+            "load_state",
+            return_value=state,
+        ), patch.object(
+            earnings_reactions,
+            "update_state",
+            side_effect=self.transactional_update(state),
+        ):
+            await modal.on_submit(interaction)
+        attachment.to_file.assert_not_awaited()
+        signals_channel.send.assert_not_awaited()
+        self.assertFalse(state["signal_queue"]["token"]["sent_to_signals"])
 
     async def test_button_rejects_channel_message_and_state_mismatches(self):
         client, signals_channel, _review_channel = await self.start_bot()
