@@ -39,6 +39,10 @@ class BorderedCalendarPostTests(unittest.TestCase):
             "Request",
             side_effect=make_request,
         ), patch.object(
+            module,
+            "WEBHOOK_URL",
+            "calendar-destination",
+        ), patch.object(
             module.urllib.request,
             "urlopen",
             return_value=FakeResponse(),
