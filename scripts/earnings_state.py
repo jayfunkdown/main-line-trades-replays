@@ -19,6 +19,7 @@ KNOWN_SECTIONS = (
     "quotes",
     "signal_queue",
     "manual_signal_drafts",
+    "post_signal_reviews",
 )
 
 SAFETY_CRITICAL_SECTIONS = (
@@ -26,6 +27,7 @@ SAFETY_CRITICAL_SECTIONS = (
     "private",
     "signal_queue",
     "manual_signal_drafts",
+    "post_signal_reviews",
 )
 
 T = TypeVar("T")

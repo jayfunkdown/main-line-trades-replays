@@ -1,0 +1,364 @@
+import copy
+import unittest
+from unittest.mock import patch
+
+with patch("dotenv.load_dotenv"):
+    from scripts import earnings_reactions
+
+
+class PostSignalReviewRecordTests(unittest.TestCase):
+    def build_record(self, **updates):
+        values = {
+            "source": earnings_reactions.POST_SIGNAL_REVIEW_SOURCE_EARNINGS,
+            "source_record_id": "earnings-token",
+            "signals_channel_id": "100",
+            "signals_message_id": "900",
+            "symbol": "ROAD",
+            "trade_direction": "short",
+            "trade_thesis": "Weekly resistance rejection.",
+            "original_chart_filename": "charts/ROAD_weekly.png",
+            "sent_at": "2026-08-11T09:30:00-04:00",
+        }
+        values.update(updates)
+        return earnings_reactions.build_post_signal_review_record(**values)
+
+    def test_builder_creates_complete_scheduled_record(self):
+        record = self.build_record()
+
+        self.assertTrue(
+            earnings_reactions.is_valid_post_signal_review_record(record)
+        )
+        self.assertEqual(record["review_id"], "900")
+        self.assertEqual(record["signals_message_id"], "900")
+        self.assertEqual(record["trade_direction"], "short")
+        self.assertEqual(record["original_chart_filename"], "ROAD_weekly.png")
+        self.assertEqual(record["review_status"], "scheduled")
+        self.assertEqual(record["review_cycle"], 1)
+        self.assertEqual(
+            record["review_due_at"],
+            "2026-09-11T09:30:00-04:00",
+        )
+
+    def test_calendar_month_clamps_month_end_and_preserves_timezone(self):
+        cases = (
+            ("2026-01-31T15:45:00-05:00", "2026-02-28T15:45:00-05:00"),
+            ("2028-01-31T15:45:00-05:00", "2028-02-29T15:45:00-05:00"),
+            ("2026-12-31T15:45:00-05:00", "2027-01-31T15:45:00-05:00"),
+        )
+
+        for sent_at, expected in cases:
+            with self.subTest(sent_at=sent_at):
+                self.assertEqual(
+                    earnings_reactions.one_calendar_month_after(sent_at),
+                    expected,
+                )
+
+    def test_builder_rejects_incomplete_or_unsafe_metadata(self):
+        invalid_updates = (
+            {"source": "legacy"},
+            {"source_record_id": ""},
+            {"signals_channel_id": True},
+            {"signals_message_id": "not-a-snowflake"},
+            {"symbol": ""},
+            {"trade_direction": None},
+            {"trade_direction": "buy"},
+            {"trade_thesis": ""},
+            {"original_chart_filename": ""},
+            {"sent_at": "not-a-date"},
+        )
+
+        for updates in invalid_updates:
+            with self.subTest(updates=updates):
+                with self.assertRaises(ValueError):
+                    self.build_record(**updates)
+
+    def test_store_is_idempotent_and_conflicts_fail_closed(self):
+        record = self.build_record()
+        state = {"post_signal_reviews": {}}
+
+        self.assertTrue(
+            earnings_reactions.store_post_signal_review(state, record)
+        )
+        self.assertTrue(
+            earnings_reactions.store_post_signal_review(state, record)
+        )
+        self.assertEqual(len(state["post_signal_reviews"]), 1)
+
+        conflict = copy.deepcopy(record)
+        conflict["trade_thesis"] = "Conflicting thesis"
+        self.assertFalse(
+            earnings_reactions.store_post_signal_review(state, conflict)
+        )
+        self.assertEqual(
+            state["post_signal_reviews"]["900"]["trade_thesis"],
+            "Weekly resistance rejection.",
+        )
+
+
+class TransactionalReviewCaptureTests(unittest.TestCase):
+    def setUp(self):
+        self.state = {
+            "public": {},
+            "private": {},
+            "quotes": {},
+            "signal_queue": {},
+            "manual_signal_drafts": {},
+            "post_signal_reviews": {},
+        }
+
+    def transactional_update(self, mutation):
+        latest = copy.deepcopy(self.state)
+        mutation(latest)
+        self.state = latest
+        return copy.deepcopy(latest)
+
+    def review_record(self, **updates):
+        values = {
+            "source": earnings_reactions.POST_SIGNAL_REVIEW_SOURCE_MANUAL,
+            "source_record_id": "draft",
+            "signals_channel_id": "100",
+            "signals_message_id": "900",
+            "symbol": "ES",
+            "trade_direction": "long",
+            "trade_thesis": "Hold above weekly support.",
+            "original_chart_filename": "chart.png",
+            "sent_at": "2026-08-11T10:00:00-04:00",
+        }
+        values.update(updates)
+        return earnings_reactions.build_post_signal_review_record(**values)
+
+    @staticmethod
+    def manual_draft():
+        return {
+            "draft_id": "draft",
+            "draft_message_id": "400",
+            "draft_channel_id": "300",
+            "creator_user_id": "1",
+            "instrument": "ES",
+            "trade_thesis": "Hold above weekly support.",
+            "trade_direction": "long",
+            "timeframe": "1W",
+            "setup_name": "Support retest",
+            "chart": {
+                "filename": "chart.png",
+                "content_type": "image/png",
+                "attachment_id": "500",
+            },
+            "created_at": "2026-08-11T09:55:00-04:00",
+            "updated_at": "2026-08-11T09:59:00-04:00",
+            "delivery_status": "sending",
+            "delivery_attempt_id": "manual-attempt",
+            "canceled": False,
+        }
+
+    def test_manual_confirmation_and_review_schedule_commit_together(self):
+        self.state["manual_signal_drafts"]["draft"] = self.manual_draft()
+        review = self.review_record()
+
+        with patch.object(
+            earnings_reactions,
+            "update_state",
+            side_effect=self.transactional_update,
+        ):
+            _state, outcome = (
+                earnings_reactions.transition_manual_signal_delivery(
+                    "draft",
+                    "manual-attempt",
+                    earnings_reactions.MANUAL_SIGNAL_SENT,
+                    "2026-08-11T10:00:00-04:00",
+                    signals_message_id="900",
+                    post_signal_review=review,
+                )
+            )
+
+        self.assertEqual(outcome, "transitioned")
+        draft = self.state["manual_signal_drafts"]["draft"]
+        self.assertEqual(draft["delivery_status"], "sent")
+        self.assertEqual(draft["signals_message_id"], "900")
+        self.assertEqual(self.state["post_signal_reviews"], {"900": review})
+
+    def test_invalid_manual_review_does_not_confirm_delivery(self):
+        self.state["manual_signal_drafts"]["draft"] = self.manual_draft()
+        invalid_review = self.review_record()
+        invalid_review["trade_direction"] = None
+
+        with patch.object(
+            earnings_reactions,
+            "update_state",
+            side_effect=self.transactional_update,
+        ):
+            _state, outcome = (
+                earnings_reactions.transition_manual_signal_delivery(
+                    "draft",
+                    "manual-attempt",
+                    earnings_reactions.MANUAL_SIGNAL_SENT,
+                    "2026-08-11T10:00:00-04:00",
+                    signals_message_id="900",
+                    post_signal_review=invalid_review,
+                )
+            )
+
+        self.assertEqual(outcome, "invalid")
+        self.assertEqual(
+            self.state["manual_signal_drafts"]["draft"]["delivery_status"],
+            "sending",
+        )
+        self.assertEqual(self.state["post_signal_reviews"], {})
+
+    def test_manual_review_must_match_delivered_message_and_source(self):
+        mismatches = (
+            {"source": earnings_reactions.POST_SIGNAL_REVIEW_SOURCE_EARNINGS},
+            {"source_record_id": "another-draft"},
+            {"signals_message_id": "901"},
+        )
+
+        for updates in mismatches:
+            with self.subTest(updates=updates):
+                self.state["manual_signal_drafts"]["draft"] = (
+                    self.manual_draft()
+                )
+                self.state["post_signal_reviews"] = {}
+                review = self.review_record(**updates)
+                with patch.object(
+                    earnings_reactions,
+                    "update_state",
+                    side_effect=self.transactional_update,
+                ):
+                    _state, outcome = (
+                        earnings_reactions.transition_manual_signal_delivery(
+                            "draft",
+                            "manual-attempt",
+                            earnings_reactions.MANUAL_SIGNAL_SENT,
+                            "2026-08-11T10:00:00-04:00",
+                            signals_message_id="900",
+                            post_signal_review=review,
+                        )
+                    )
+
+                self.assertEqual(outcome, "invalid")
+                self.assertEqual(
+                    self.state["manual_signal_drafts"]["draft"]["delivery_status"],
+                    "sending",
+                )
+                self.assertEqual(self.state["post_signal_reviews"], {})
+
+    def test_earnings_confirmation_and_review_schedule_commit_together(self):
+        self.state["signal_queue"]["earnings-token"] = {
+            "sent_to_signals": False,
+            "delivery_status": "sending",
+            "delivery_attempt_id": "earnings-attempt",
+        }
+        review = self.review_record(
+            source=earnings_reactions.POST_SIGNAL_REVIEW_SOURCE_EARNINGS,
+            source_record_id="earnings-token",
+            symbol="ROAD",
+            trade_direction="short",
+            trade_thesis="Weekly resistance rejection.",
+            original_chart_filename="ROAD.png",
+        )
+
+        with patch.object(
+            earnings_reactions,
+            "update_state",
+            side_effect=self.transactional_update,
+        ):
+            _state, outcome = earnings_reactions.transition_signal_delivery(
+                "earnings-token",
+                "earnings-attempt",
+                earnings_reactions.SIGNAL_DELIVERY_SENT,
+                "2026-08-11T10:00:00-04:00",
+                updates={"signals_message_id": "900"},
+                post_signal_review=review,
+            )
+
+        self.assertEqual(outcome, "transitioned")
+        item = self.state["signal_queue"]["earnings-token"]
+        self.assertTrue(item["sent_to_signals"])
+        self.assertEqual(item["delivery_status"], "sent")
+        self.assertEqual(item["signals_message_id"], "900")
+        self.assertEqual(self.state["post_signal_reviews"], {"900": review})
+
+    def test_conflicting_review_blocks_confirmation_and_duplicate_window(self):
+        self.state["signal_queue"]["earnings-token"] = {
+            "sent_to_signals": False,
+            "delivery_status": "sending",
+            "delivery_attempt_id": "earnings-attempt",
+        }
+        original = self.review_record(
+            source=earnings_reactions.POST_SIGNAL_REVIEW_SOURCE_EARNINGS,
+            source_record_id="another-token",
+        )
+        self.state["post_signal_reviews"]["900"] = original
+        conflict = self.review_record(
+            source=earnings_reactions.POST_SIGNAL_REVIEW_SOURCE_EARNINGS,
+            source_record_id="earnings-token",
+        )
+
+        with patch.object(
+            earnings_reactions,
+            "update_state",
+            side_effect=self.transactional_update,
+        ):
+            _state, outcome = earnings_reactions.transition_signal_delivery(
+                "earnings-token",
+                "earnings-attempt",
+                earnings_reactions.SIGNAL_DELIVERY_SENT,
+                "2026-08-11T10:00:00-04:00",
+                updates={"signals_message_id": "900"},
+                post_signal_review=conflict,
+            )
+
+        self.assertEqual(outcome, "invalid")
+        item = self.state["signal_queue"]["earnings-token"]
+        self.assertFalse(item["sent_to_signals"])
+        self.assertEqual(item["delivery_status"], "sending")
+        self.assertEqual(self.state["post_signal_reviews"]["900"], original)
+
+    def test_earnings_review_must_match_queue_token_and_delivered_message(self):
+        mismatches = (
+            {"source": earnings_reactions.POST_SIGNAL_REVIEW_SOURCE_MANUAL},
+            {"source_record_id": "another-token"},
+            {"signals_message_id": "901"},
+        )
+
+        for updates in mismatches:
+            with self.subTest(updates=updates):
+                self.state["signal_queue"]["earnings-token"] = {
+                    "sent_to_signals": False,
+                    "delivery_status": "sending",
+                    "delivery_attempt_id": "earnings-attempt",
+                }
+                self.state["post_signal_reviews"] = {}
+                review_values = {
+                    "source": (
+                        earnings_reactions.POST_SIGNAL_REVIEW_SOURCE_EARNINGS
+                    ),
+                    "source_record_id": "earnings-token",
+                }
+                review_values.update(updates)
+                review = self.review_record(**review_values)
+                with patch.object(
+                    earnings_reactions,
+                    "update_state",
+                    side_effect=self.transactional_update,
+                ):
+                    _state, outcome = (
+                        earnings_reactions.transition_signal_delivery(
+                            "earnings-token",
+                            "earnings-attempt",
+                            earnings_reactions.SIGNAL_DELIVERY_SENT,
+                            "2026-08-11T10:00:00-04:00",
+                            updates={"signals_message_id": "900"},
+                            post_signal_review=review,
+                        )
+                    )
+
+                self.assertEqual(outcome, "invalid")
+                item = self.state["signal_queue"]["earnings-token"]
+                self.assertFalse(item["sent_to_signals"])
+                self.assertEqual(item["delivery_status"], "sending")
+                self.assertEqual(self.state["post_signal_reviews"], {})
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -60,6 +60,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 import argparse
 import asyncio
+import calendar
 import copy
 import hashlib
 import tempfile
@@ -136,6 +137,14 @@ TRADE_DIRECTION_SHORT = "short"
 TRADE_DIRECTIONS = {
     TRADE_DIRECTION_LONG,
     TRADE_DIRECTION_SHORT,
+}
+
+POST_SIGNAL_REVIEW_SCHEDULED = "scheduled"
+POST_SIGNAL_REVIEW_SOURCE_EARNINGS = "earnings"
+POST_SIGNAL_REVIEW_SOURCE_MANUAL = "manual"
+POST_SIGNAL_REVIEW_SOURCES = {
+    POST_SIGNAL_REVIEW_SOURCE_EARNINGS,
+    POST_SIGNAL_REVIEW_SOURCE_MANUAL,
 }
 MANUAL_SIGNAL_IMAGE_TYPES = {
     ".png": "image/png",
@@ -1922,6 +1931,136 @@ def trade_direction_line(value: Any) -> str:
     return "⚪ **Direction:** Select Long or Short"
 
 
+def one_calendar_month_after(value: Any) -> str:
+    sent_at = parse_iso_datetime(value)
+    if sent_at is None:
+        raise ValueError("Signal sent_at must be a valid ISO datetime.")
+
+    if sent_at.month == 12:
+        target_year = sent_at.year + 1
+        target_month = 1
+    else:
+        target_year = sent_at.year
+        target_month = sent_at.month + 1
+
+    target_day = min(
+        sent_at.day,
+        calendar.monthrange(target_year, target_month)[1],
+    )
+    return sent_at.replace(
+        year=target_year,
+        month=target_month,
+        day=target_day,
+    ).isoformat()
+
+
+def build_post_signal_review_record(
+    *,
+    source: str,
+    source_record_id: str,
+    signals_channel_id: Any,
+    signals_message_id: Any,
+    symbol: str,
+    trade_direction: Any,
+    trade_thesis: str,
+    original_chart_filename: str,
+    sent_at: str,
+) -> dict[str, Any]:
+    normalized_source = str(source or "").strip().lower()
+    normalized_direction = normalized_trade_direction(trade_direction)
+    channel_id = discord_id_text(signals_channel_id)
+    message_id = discord_id_text(signals_message_id)
+    sent_datetime = parse_iso_datetime(sent_at)
+    required_text = {
+        "source_record_id": source_record_id,
+        "symbol": symbol,
+        "trade_thesis": trade_thesis,
+        "original_chart_filename": original_chart_filename,
+    }
+    if (
+        normalized_source not in POST_SIGNAL_REVIEW_SOURCES
+        or normalized_direction is None
+        or channel_id is None
+        or message_id is None
+        or sent_datetime is None
+        or any(
+            not isinstance(item, str) or not item.strip()
+            for item in required_text.values()
+        )
+    ):
+        raise ValueError("Signal review metadata is incomplete or invalid.")
+
+    normalized_sent_at = sent_datetime.isoformat()
+    return {
+        "review_id": message_id,
+        "source": normalized_source,
+        "source_record_id": source_record_id.strip(),
+        "signals_channel_id": channel_id,
+        "signals_message_id": message_id,
+        "symbol": symbol.strip(),
+        "trade_direction": normalized_direction,
+        "trade_thesis": trade_thesis.strip(),
+        "original_chart_filename": Path(original_chart_filename).name,
+        "sent_at": normalized_sent_at,
+        "review_due_at": one_calendar_month_after(normalized_sent_at),
+        "review_status": POST_SIGNAL_REVIEW_SCHEDULED,
+        "review_cycle": 1,
+        "created_at": normalized_sent_at,
+        "updated_at": normalized_sent_at,
+    }
+
+
+def is_valid_post_signal_review_record(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if value.get("source") not in POST_SIGNAL_REVIEW_SOURCES:
+        return False
+    if normalized_trade_direction(value.get("trade_direction")) is None:
+        return False
+    if value.get("review_status") != POST_SIGNAL_REVIEW_SCHEDULED:
+        return False
+    if value.get("review_cycle") != 1:
+        return False
+    if discord_id_text(value.get("review_id")) is None:
+        return False
+    if value.get("review_id") != value.get("signals_message_id"):
+        return False
+    if discord_id_text(value.get("signals_channel_id")) is None:
+        return False
+    for field in (
+        "source_record_id",
+        "symbol",
+        "trade_thesis",
+        "original_chart_filename",
+    ):
+        if not isinstance(value.get(field), str) or not value[field].strip():
+            return False
+    for field in ("sent_at", "review_due_at", "created_at", "updated_at"):
+        if parse_iso_datetime(value.get(field)) is None:
+            return False
+    return True
+
+
+def store_post_signal_review(
+    state: dict[str, Any],
+    review_record: Any,
+) -> bool:
+    if not is_valid_post_signal_review_record(review_record):
+        return False
+    reviews = state.get("post_signal_reviews")
+    if reviews is None and "post_signal_reviews" not in state:
+        reviews = {}
+        state["post_signal_reviews"] = reviews
+    if not isinstance(reviews, dict):
+        return False
+    review_id = review_record["review_id"]
+    existing = reviews.get(review_id)
+    if existing is not None and existing != review_record:
+        return False
+    reviews[review_id] = copy.deepcopy(review_record)
+    return True
+
+
 def build_bordered_discord_embed(
     discord_module: Any,
     description: str,
@@ -2156,6 +2295,7 @@ def transition_manual_signal_delivery(
     *,
     error: str | None = None,
     signals_message_id: str | None = None,
+    post_signal_review: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], str]:
     if status not in {
         MANUAL_SIGNAL_READY,
@@ -2164,6 +2304,7 @@ def transition_manual_signal_delivery(
     }:
         raise ValueError(f"Unsupported manual delivery transition: {status}")
     outcome = "missing"
+    stored_review = copy.deepcopy(post_signal_review)
 
     def mutation(state: dict[str, Any]) -> None:
         nonlocal outcome
@@ -2179,6 +2320,20 @@ def transition_manual_signal_delivery(
         if status == MANUAL_SIGNAL_SENT and discord_id_text(
             signals_message_id
         ) is None:
+            outcome = "invalid"
+            return
+        if (
+            status == MANUAL_SIGNAL_SENT
+            and stored_review is not None
+            and (
+                stored_review.get("source")
+                != POST_SIGNAL_REVIEW_SOURCE_MANUAL
+                or stored_review.get("source_record_id") != draft_id
+                or stored_review.get("signals_message_id")
+                != discord_id_text(signals_message_id)
+                or not store_post_signal_review(state, stored_review)
+            )
+        ):
             outcome = "invalid"
             return
         record["delivery_status"] = status
@@ -2494,6 +2649,7 @@ def transition_signal_delivery(
     *,
     error: str | None = None,
     updates: dict[str, Any] | None = None,
+    post_signal_review: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], str]:
     """Atomically finish the matching sending attempt."""
     if status not in {
@@ -2505,6 +2661,7 @@ def transition_signal_delivery(
 
     outcome = "missing"
     stored_updates = copy.deepcopy(updates or {})
+    stored_review = copy.deepcopy(post_signal_review)
 
     def mutation(state: dict[str, Any]) -> None:
         nonlocal outcome
@@ -2519,6 +2676,21 @@ def transition_signal_delivery(
             or str(item.get("delivery_attempt_id") or "") != attempt_id
         ):
             outcome = "mismatch"
+            return
+
+        if (
+            status == SIGNAL_DELIVERY_SENT
+            and stored_review is not None
+            and (
+                stored_review.get("source")
+                != POST_SIGNAL_REVIEW_SOURCE_EARNINGS
+                or stored_review.get("source_record_id") != token
+                or stored_review.get("signals_message_id")
+                != discord_id_text(stored_updates.get("signals_message_id"))
+                or not store_post_signal_review(state, stored_review)
+            )
+        ):
+            outcome = "invalid"
             return
 
         item["delivery_status"] = status
@@ -3795,15 +3967,28 @@ async def run_review_button_bot() -> None:
                         "Delivery could not be confirmed. Do not retry until staff reconcile it.",
                     )
                     return
+                sent_at = datetime.now(EASTERN).isoformat()
                 try:
+                    review_record = build_post_signal_review_record(
+                        source=POST_SIGNAL_REVIEW_SOURCE_MANUAL,
+                        source_record_id=draft_id,
+                        signals_channel_id=signals_channel_id,
+                        signals_message_id=signals_message_id,
+                        symbol=record["instrument"],
+                        trade_direction=record.get("trade_direction"),
+                        trade_thesis=record["trade_thesis"],
+                        original_chart_filename=chart_filename,
+                        sent_at=sent_at,
+                    )
                     _state, confirmation = transition_manual_signal_delivery(
                         draft_id,
                         attempt_id,
                         MANUAL_SIGNAL_SENT,
-                        datetime.now(EASTERN).isoformat(),
+                        sent_at,
                         signals_message_id=signals_message_id,
+                        post_signal_review=review_record,
                     )
-                except (EarningsStateError, OSError):
+                except (EarningsStateError, OSError, ValueError):
                     confirmation = "persistence_failed"
                 if confirmation != "transitioned":
                     await write_manual_signal_log(
@@ -4453,6 +4638,17 @@ async def run_review_button_bot() -> None:
             }
 
             try:
+                review_record = build_post_signal_review_record(
+                    source=POST_SIGNAL_REVIEW_SOURCE_EARNINGS,
+                    source_record_id=token,
+                    signals_channel_id=signals_channel_id,
+                    signals_message_id=signals_message_id,
+                    symbol=candidate["symbol"],
+                    trade_direction=trade_direction,
+                    trade_thesis=thesis,
+                    original_chart_filename=attachment.filename,
+                    sent_at=sent_at,
+                )
                 latest_state, confirmation_outcome = (
                     transition_signal_delivery(
                         token,
@@ -4460,9 +4656,10 @@ async def run_review_button_bot() -> None:
                         SIGNAL_DELIVERY_SENT,
                         sent_at,
                         updates=signal_updates,
+                        post_signal_review=review_record,
                     )
                 )
-            except (EarningsStateError, OSError):
+            except (EarningsStateError, OSError, ValueError):
                 confirmation_outcome = "persistence_failed"
 
             if confirmation_outcome != "transitioned":
