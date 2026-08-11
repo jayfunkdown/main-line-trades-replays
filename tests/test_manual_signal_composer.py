@@ -499,38 +499,22 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
             submit.response.send_message.await_args.args[0],
         )
 
-    async def test_direction_selector_persists_and_updates_the_draft_card(self):
-        client, _tree, view = await self.start_bot()
-        attachment = self.attachment()
-        message = SimpleNamespace(
-            id=400,
-            author=client.user,
-            channel=SimpleNamespace(id=300),
-            type=discord.MessageType.default,
-            attachments=[attachment],
-            edit=AsyncMock(),
-        )
-        self.draft_record(trade_direction=None)
-        interaction = self.interaction(client, message=message)
-        selector = self.button(view, "manual_signal_direction")
-        selector._values = ["short"]
-        with patch.object(
-            earnings_reactions,
-            "load_state",
-            side_effect=lambda: copy.deepcopy(self.state),
-        ), patch.object(
-            earnings_reactions,
-            "update_state",
-            side_effect=self.transactional_update,
-        ):
-            await selector.callback(interaction)
+    async def test_draft_controls_have_no_redundant_direction_selector(self):
+        _client, _tree, view = await self.start_bot()
+        custom_ids = {
+            child.custom_id for child in view.children
+        }
         self.assertEqual(
-            self.state["manual_signal_drafts"]["draft"]["trade_direction"],
-            "short",
+            custom_ids,
+            {
+                "manual_signal_publish",
+                "manual_signal_edit",
+                "manual_signal_cancel",
+            },
         )
-        description = message.edit.await_args.kwargs["embed"].description
-        self.assertIn("🔴 **Direction:** Short", description)
-        self.signals.send.assert_not_awaited()
+        self.assertTrue(
+            all(isinstance(child, discord.ui.Button) for child in view.children)
+        )
 
     async def test_edit_retains_or_replaces_chart_and_cancel_deletes(self):
         client, _tree, view = await self.start_bot()
@@ -562,7 +546,15 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
         ):
             await self.button(view, "manual_signal_edit").callback(interaction)
         modal = interaction.response.modal
+        self.assertIsNone(modal.setup_name)
+        self.assertEqual(
+            [option.value for option in modal.trade_direction.options],
+            ["long", "short"],
+        )
+        self.assertTrue(modal.trade_direction.options[0].default)
+        self.assertFalse(modal.trade_direction.options[1].default)
         modal.trade_thesis._value = "Edited thesis"
+        modal.trade_direction._values = ["short"]
         modal.trade_chart._values = []
         submit = self.interaction(client, message=message)
         with patch.object(
@@ -581,6 +573,18 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
             self.state["manual_signal_drafts"]["draft"]["chart"]["filename"],
             "chart.png",
         )
+        self.assertEqual(
+            self.state["manual_signal_drafts"]["draft"]["trade_direction"],
+            "short",
+        )
+        self.assertEqual(
+            self.state["manual_signal_drafts"]["draft"]["setup_name"],
+            "Breakout",
+        )
+        self.assertIn(
+            "🔴 **Direction:** Short",
+            message.edit.await_args.kwargs["embed"].description,
+        )
         message.edit.reset_mock()
         interaction = self.interaction(client, message=message)
         with patch.object(
@@ -588,6 +592,7 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
         ):
             await self.button(view, "manual_signal_edit").callback(interaction)
         replacement_modal = interaction.response.modal
+        replacement_modal.trade_direction._values = ["long"]
         replacement_modal.trade_chart._values = [
             self.attachment("replacement.webp", "image/webp", 501)
         ]
