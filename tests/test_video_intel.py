@@ -49,6 +49,7 @@ class VideoIntelTests(unittest.TestCase):
                 "@TheDiaryOfACEO",
                 "@GrahamStephan",
                 "@HeresyFinancial",
+                "@AndreiJikh",
             ),
         )
 
