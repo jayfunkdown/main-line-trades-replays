@@ -227,6 +227,7 @@ def global_market_block(items):
 
 def market_wrap_description(date_label, sections):
     parts = [
+        "# 🌆 Main Line Trades Market Wrap",
         f"**{date_label}**",
         (
             "The closing snapshot for U.S. and global markets, crypto, "
@@ -360,7 +361,6 @@ def build_market_wrap_payload(
         "allowed_mentions": {"parse": []},
         "embeds": [
             {
-                "title": "🌆 Main Line Trades Market Wrap",
                 "description": description,
                 "color": market_wrap_color(market_snapshot),
                 "footer": {

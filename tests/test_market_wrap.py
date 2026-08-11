@@ -123,6 +123,10 @@ class MarketWrapTests(unittest.TestCase):
         embed = payload["embeds"][0]
         self.assertEqual(embed["color"], 0x00CFFF)
         description = embed["description"]
+        self.assertNotIn("title", embed)
+        self.assertTrue(
+            description.startswith("# 🌆 Main Line Trades Market Wrap\n\n")
+        )
         self.assertNotIn("fields", embed)
         self.assertIn("Monday, August 10, 2026", description)
         headings = [
