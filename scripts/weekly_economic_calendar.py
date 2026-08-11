@@ -178,6 +178,14 @@ def separator():
     return "────────────────────────────"
 
 
+def format_month_day(value):
+    return f"{value.strftime('%B')} {value.day}"
+
+
+def format_event_time(value):
+    return value.strftime("%I:%M %p ET").lstrip("0")
+
+
 def build_message(events):
     monday, friday = current_week_bounds()
 
@@ -189,10 +197,10 @@ def build_message(events):
 
     lines = []
 
-    lines.append("🗓️ **Weekly U.S. Economic Calendar**")
+    lines.append("# 🗓️ Weekly U.S. Economic Calendar")
     lines.append("")
     lines.append(
-        f"**{monday.strftime('%B %-d')}–{friday.strftime('%-d, %Y')}**"
+        f"**{format_month_day(monday)}–{friday.day}, {friday.year}**"
     )
     lines.append("")
     lines.append("**High-impact USD events only**")
@@ -200,7 +208,7 @@ def build_message(events):
     lines.append("")
     lines.append(separator())
     lines.append("")
-    lines.append("⚠️ **Week Overview**")
+    lines.append("## ⚠️ Week Overview")
     lines.append(f"• **Risk level:** {risk}")
     lines.append(f"• **High-impact events:** {len(events)}")
 
@@ -222,7 +230,7 @@ def build_message(events):
 
         lines.append("")
         lines.append(
-            f"**{day} — {day_date.strftime('%B %-d')}**"
+            f"## {day} — {format_month_day(day_date)}"
         )
         lines.append("")
 
@@ -233,7 +241,7 @@ def build_message(events):
             continue
 
         for event in day_events:
-            time_text = event["datetime"].strftime("%-I:%M %p ET")
+            time_text = format_event_time(event["datetime"])
 
             lines.append(f"🟥 **{time_text}**")
             lines.append(f"**{event['title']}**")
@@ -244,7 +252,7 @@ def build_message(events):
         lines.append(separator())
 
     lines.append("")
-    lines.append("⚠️ **Trading Reminder**")
+    lines.append("## ⚠️ Trading Reminder")
     lines.append(
         "High-impact releases can cause rapid volatility, wider spreads, "
         "slippage, and sudden changes in price action."
