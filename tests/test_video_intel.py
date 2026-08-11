@@ -10,13 +10,20 @@ with patch("dotenv.load_dotenv"):
     from scripts import replay_to_discord
 
 
-def video(video_id, published, channel="Example Channel"):
+def video(
+    video_id,
+    published,
+    channel="Example Channel",
+    *,
+    duration_seconds=750,
+):
     return {
         "id": video_id,
         "title": f"Video {video_id}",
         "url": f"https://www.youtube.com/watch?v={video_id}",
         "published": published,
         "duration": "12m 30s",
+        "duration_seconds": duration_seconds,
         "thumbnail": f"https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg",
         "channel_id": f"channel-{channel}",
         "channel_title": channel,
@@ -124,6 +131,53 @@ class VideoIntelTests(unittest.TestCase):
             )
 
         self.assertEqual([item["id"] for item in result], ["first", "later"])
+
+    def test_video_intel_excludes_shorts_and_unknown_durations(self):
+        channels = {
+            "@one": {
+                "handle": "@one",
+                "id": "one-id",
+                "title": "One",
+                "uploads_playlist_id": "one-uploads",
+            }
+        }
+        uploads = [
+            video("short-71", "2026-08-11T12:00:00Z", duration_seconds=71),
+            video("short-180", "2026-08-11T12:01:00Z", duration_seconds=180),
+            video("unknown", "2026-08-11T12:02:00Z", duration_seconds=None),
+            video("long-181", "2026-08-11T12:03:00Z", duration_seconds=181),
+            video("long", "2026-08-11T12:04:00Z", duration_seconds=1200),
+        ]
+
+        with patch.object(
+            replay_to_discord,
+            "get_channel_for_handle",
+            side_effect=lambda handle, api_key: channels[handle],
+        ), patch.object(
+            replay_to_discord,
+            "fetch_playlist_videos",
+            return_value=uploads,
+        ):
+            result = replay_to_discord.fetch_video_intel_videos(
+                ("@one",), "api-key", 25
+            )
+
+        self.assertEqual([item["id"] for item in result], ["long-181", "long"])
+
+    def test_normalized_video_retains_duration_seconds_for_filtering(self):
+        normalized = replay_to_discord.normalize_video_item(
+            {
+                "id": "short",
+                "snippet": {
+                    "title": "Short upload",
+                    "publishedAt": "2026-08-11T12:00:00Z",
+                },
+                "contentDetails": {"duration": "PT1M11S"},
+            }
+        )
+
+        self.assertEqual(normalized["duration"], "1m 11s")
+        self.assertEqual(normalized["duration_seconds"], 71)
 
     def test_embed_matches_approved_video_card_style(self):
         item = video("intel", "2026-08-11T12:00:00Z", "Jason Pizzino")
