@@ -441,7 +441,7 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
         modal.instrument._value = "EUR/USD"
         modal.trade_thesis._value = "Hold the breakout."
         modal.timeframe._value = "4h"
-        modal.setup_name._value = "Retest"
+        modal.trade_direction._values = ["long"]
         modal.trade_chart._values = [self.attachment()]
         submit = self.interaction(client)
         with patch.object(
@@ -456,9 +456,9 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 "description": earnings_reactions.build_manual_signal_message(
                     "EUR/USD",
                     "Hold the breakout.",
-                    trade_direction=None,
+                    trade_direction="long",
                     timeframe="4h",
-                    setup_name="Retest",
+                    setup_name="",
                 ),
                 "color": 0xFF2BD6,
                 "image": {"url": "attachment://chart.png"},
@@ -469,7 +469,35 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
         record = next(iter(self.state["manual_signal_drafts"].values()))
         self.assertEqual(record["draft_message_id"], "400")
         self.assertEqual(record["delivery_status"], "ready")
-        self.assertIsNone(record["trade_direction"])
+        self.assertEqual(record["trade_direction"], "long")
+
+    async def test_new_signal_form_requires_direction_before_draft_creation(self):
+        client, tree, _view = await self.start_bot()
+        interaction = self.interaction(client)
+        await tree.commands["new-signal"](interaction)
+        modal = interaction.response.modal
+
+        self.assertEqual(
+            [option.value for option in modal.trade_direction.options],
+            ["long", "short"],
+        )
+        self.assertEqual(modal.trade_direction.min_values, 1)
+        self.assertEqual(modal.trade_direction.max_values, 1)
+        self.assertIsNone(modal.setup_name)
+
+        modal.instrument._value = "EUR/USD"
+        modal.trade_thesis._value = "Hold the breakout."
+        modal.timeframe._value = "4h"
+        modal.trade_chart._values = [self.attachment()]
+        submit = self.interaction(client)
+        await modal.on_submit(submit)
+
+        self.drafts.send.assert_not_awaited()
+        self.assertEqual(self.state["manual_signal_drafts"], {})
+        self.assertIn(
+            "Select Long or Short",
+            submit.response.send_message.await_args.args[0],
+        )
 
     async def test_direction_selector_persists_and_updates_the_draft_card(self):
         client, _tree, view = await self.start_bot()
