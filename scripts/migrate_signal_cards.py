@@ -313,14 +313,59 @@ def post_card(token, channel_id, candidate, file_data):
 def verify_new_message(message, candidate):
     embeds = message.get("embeds") or []
     attachments = message.get("attachments") or []
-    if len(embeds) != 1 or len(attachments) != 1:
+    if len(embeds) != 1:
         raise RuntimeError("Created card response has an unexpected structure.")
-    if embeds[0].get("description") != candidate["description"]:
+    embed = embeds[0]
+    if embed.get("description") != candidate["description"]:
         raise RuntimeError("Created card description does not match the original.")
-    if embeds[0].get("color") != BRAND_NEON_PINK:
+    if embed.get("color") != BRAND_NEON_PINK:
         raise RuntimeError("Created card color is incorrect.")
-    if attachments[0].get("filename") != candidate["filename"]:
+    image_url = str((embed.get("image") or {}).get("url") or "")
+    parsed_image = urllib.parse.urlparse(image_url)
+    if (
+        parsed_image.scheme != "https"
+        or parsed_image.netloc not in {"cdn.discordapp.com", "media.discordapp.net"}
+    ):
+        raise RuntimeError("Created card chart image is missing or invalid.")
+    if len(attachments) > 1:
+        raise RuntimeError("Created card response has unexpected attachments.")
+    if attachments and attachments[0].get("filename") != candidate["filename"]:
         raise RuntimeError("Created card attachment name is incorrect.")
+
+
+def reconcile_unknown_message(
+    *,
+    token,
+    channel_id,
+    original_message,
+    new_message_id,
+    state_path,
+):
+    candidate = validate_candidate(original_message)
+    original_message_id = str(original_message["id"])
+    content_hash = hashlib.sha256(
+        candidate["description"].encode("utf-8")
+    ).hexdigest()
+    state = load_state(state_path)
+    record = state["records"].get(original_message_id)
+    if not record or record.get("status") != "unknown":
+        raise RuntimeError(
+            f"Message {original_message_id} is not awaiting reconciliation."
+        )
+    if record.get("content_sha256") != content_hash:
+        raise RuntimeError(
+            f"State hash mismatch for message {original_message_id}."
+        )
+
+    new_message = fetch_message(token, channel_id, new_message_id)
+    verify_new_message(new_message, candidate)
+    record.update(
+        {
+            "status": "posted",
+            "new_message_id": str(new_message_id),
+        }
+    )
+    atomic_private_json(state_path, state)
 
 
 def fetch_message(token, channel_id, message_id):
@@ -460,7 +505,43 @@ def audit(messages):
     )
 
     candidates = []
+    carded_messages = []
     for message in messages:
+        if classification(message) == "already_carded":
+            embeds = [
+                embed
+                for embed in message.get("embeds") or []
+                if isinstance(embed, dict)
+            ]
+            descriptions = [
+                str(embed.get("description") or "")
+                for embed in embeds
+            ]
+            carded_messages.append(
+                {
+                    "message_id": str(message.get("id") or ""),
+                    "timestamp": message.get("timestamp"),
+                    "embed_count": len(embeds),
+                    "embed_colors": [embed.get("color") for embed in embeds],
+                    "description_hashes": [
+                        hashlib.sha256(value.encode("utf-8")).hexdigest()
+                        for value in descriptions
+                    ],
+                    "attachment_count": len(message.get("attachments") or []),
+                    "attachment_names": [
+                        str(attachment.get("filename") or "")
+                        for attachment in message.get("attachments") or []
+                    ],
+                    "embed_image_hosts": [
+                        urllib.parse.urlparse(
+                            str((embed.get("image") or {}).get("url") or "")
+                        ).netloc
+                        for embed in embeds
+                        if (embed.get("image") or {}).get("url")
+                    ],
+                }
+            )
+
         if classification(message) != "migratable_automated_signal":
             continue
 
@@ -525,6 +606,10 @@ def audit(messages):
             candidates,
             key=lambda item: item["timestamp"] or "",
         ),
+        "already_carded_messages": sorted(
+            carded_messages,
+            key=lambda item: item["timestamp"] or "",
+        ),
     }
 
 
@@ -548,6 +633,12 @@ def build_parser():
         action="store_true",
         help="Apply the confirmed recreate-before-delete migration.",
     )
+    modes.add_argument(
+        "--reconcile-unknown",
+        nargs=2,
+        metavar=("ORIGINAL_MESSAGE_ID", "NEW_MESSAGE_ID"),
+        help="Verify and reconcile one ambiguous create without reposting it.",
+    )
     parser.add_argument("--author-id")
     parser.add_argument("--through-message-id")
     parser.add_argument("--expect-count", type=int)
@@ -566,6 +657,35 @@ def main() -> int:
     if args.audit:
         messages = fetch_channel_history(token, channel_id)
         print(json.dumps(audit(messages), indent=2))
+        return 0
+
+    if args.reconcile_unknown:
+        if args.confirm_channel_id != channel_id:
+            raise RuntimeError(
+                "--confirm-channel-id does not match SIGNALS_CHANNEL_ID."
+            )
+        if args.state_path is None or not args.state_path.is_absolute():
+            raise RuntimeError(
+                "An absolute --state-path is required for reconciliation."
+            )
+        original_message_id, new_message_id = args.reconcile_unknown
+        if not original_message_id.isdigit() or not new_message_id.isdigit():
+            raise RuntimeError("Reconciliation message IDs must be numeric.")
+        original_message = fetch_message(
+            token,
+            channel_id,
+            original_message_id,
+        )
+        reconcile_unknown_message(
+            token=token,
+            channel_id=channel_id,
+            original_message=original_message,
+            new_message_id=new_message_id,
+            state_path=args.state_path,
+        )
+        print(
+            f"Reconciled signal {original_message_id} to {new_message_id}."
+        )
         return 0
 
     if not args.author_id or not args.through_message_id:
