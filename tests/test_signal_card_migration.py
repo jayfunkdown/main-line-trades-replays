@@ -58,6 +58,15 @@ def card_response(message, new_id="900"):
     }
 
 
+def hidden_attachment_card_response(message, new_id="900"):
+    response = card_response(message, new_id)
+    response["attachments"] = []
+    response["embeds"][0]["image"]["url"] = (
+        "https://cdn.discordapp.com/attachments/channel/message/ACME.png"
+    )
+    return response
+
+
 class FakeResponse:
     status = 200
 
@@ -213,6 +222,67 @@ class SignalCardMigrationTests(unittest.TestCase):
         self.assertIn(b'"color":16722902', captured["data"])
         self.assertIn(b'"allowed_mentions":{"parse":[]}', captured["data"])
         self.assertNotIn(b'"content":', captured["data"])
+
+    def test_verification_accepts_discord_hidden_embed_attachment(self):
+        message = legacy_message("100")
+        candidate = migration.validate_candidate(message)
+
+        migration.verify_new_message(
+            hidden_attachment_card_response(message),
+            candidate,
+        )
+
+    def test_verification_rejects_card_without_discord_chart_image(self):
+        message = legacy_message("100")
+        candidate = migration.validate_candidate(message)
+        response = hidden_attachment_card_response(message)
+        response["embeds"][0]["image"] = {}
+
+        with self.assertRaisesRegex(RuntimeError, "chart image"):
+            migration.verify_new_message(response, candidate)
+
+    def test_unknown_reconciliation_verifies_existing_card_without_reposting(self):
+        message = legacy_message("100")
+        existing_card = hidden_attachment_card_response(message, "900")
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            migration,
+            "fetch_message",
+            return_value=existing_card,
+        ) as fetch:
+            state_path = Path(directory) / "state.json"
+            candidate = migration.validate_candidate(message)
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "records": {
+                            "100": {
+                                "status": "unknown",
+                                "content_sha256": migration.hashlib.sha256(
+                                    candidate["description"].encode("utf-8")
+                                ).hexdigest(),
+                                "filename": candidate["filename"],
+                                "new_message_id": None,
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            migration.reconcile_unknown_message(
+                token="token",
+                channel_id=CHANNEL_ID,
+                original_message=message,
+                new_message_id="900",
+                state_path=state_path,
+            )
+            state = json.loads(state_path.read_text("utf-8"))
+
+        self.assertEqual(state["records"]["100"]["status"], "posted")
+        self.assertEqual(state["records"]["100"]["new_message_id"], "900")
+        fetch.assert_called_once_with("token", CHANNEL_ID, "900")
 
     def test_success_posts_before_delete_and_persists_complete_state(self):
         messages = [legacy_message("100"), legacy_message("101")]
@@ -373,6 +443,7 @@ class SignalCardMigrationTests(unittest.TestCase):
             audit=False,
             dry_run=False,
             apply=True,
+            reconcile_unknown=None,
             author_id=BOT_ID,
             through_message_id="200",
             expect_count=None,
