@@ -380,12 +380,16 @@ def normalize_video_item(
 ) -> dict[str, Any] | None:
     snippet = item.get("snippet") or {}
     content_details = item.get("contentDetails") or {}
+    live_streaming_details = item.get("liveStreamingDetails") or {}
 
     if not isinstance(snippet, dict):
         return None
 
     if not isinstance(content_details, dict):
         content_details = {}
+
+    if not isinstance(live_streaming_details, dict):
+        live_streaming_details = {}
 
     video_id = str(item.get("id") or "").strip()
     title = str(snippet.get("title") or "").strip()
@@ -417,6 +421,9 @@ def normalize_video_item(
         "published": published,
         "duration": parse_iso_duration(duration_value),
         "duration_seconds": parse_iso_duration_seconds(duration_value),
+        "actual_end_time": str(
+            live_streaming_details.get("actualEndTime") or ""
+        ).strip(),
         "thumbnail": best_thumbnail(thumbnails),
         "channel_id": str(snippet.get("channelId") or "").strip(),
         "channel_title": str(snippet.get("channelTitle") or "").strip(),
@@ -433,7 +440,7 @@ def fetch_video_details(
     response = youtube_api_get(
         "videos",
         {
-            "part": "snippet,contentDetails",
+            "part": "snippet,contentDetails,liveStreamingDetails",
             "id": ",".join(video_ids[:50]),
             "maxResults": min(len(video_ids), 50),
         },
@@ -523,14 +530,26 @@ def fetch_matching_uploads(
             video_ids,
             api_key,
         )
-        if video["title"].casefold().startswith(
-            normalized_prefix
+        if (
+            video["title"].casefold().startswith(normalized_prefix)
+            and is_completed_replay(video)
         )
     ]
 
     return sorted(
         matches,
         key=lambda item: item["published"],
+    )
+
+
+def is_completed_replay(video: dict[str, Any]) -> bool:
+    duration_seconds = video.get("duration_seconds")
+    actual_end_time = str(video.get("actual_end_time") or "").strip()
+    return (
+        isinstance(duration_seconds, int)
+        and not isinstance(duration_seconds, bool)
+        and duration_seconds > 0
+        and parse_youtube_datetime(actual_end_time) is not None
     )
 
 
