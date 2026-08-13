@@ -221,6 +221,29 @@ class PostSignalReviewRecordTests(unittest.TestCase):
         self.assertIn('"Original Signal Chart"', source)
         self.assertIn('"Updated Weekly Chart"', source)
 
+    def test_chart_embeds_expand_to_the_text_card_width(self):
+        class FakeEmbed:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self.image_url = None
+
+            def set_image(self, *, url):
+                self.image_url = url
+
+        fake_discord = type("FakeDiscord", (), {"Embed": FakeEmbed})
+        embed = earnings_reactions.build_post_signal_chart_embed(
+            fake_discord,
+            "Original Signal Chart",
+            "attachment://original.png",
+        )
+
+        self.assertEqual(
+            embed.kwargs["description"],
+            earnings_reactions.POST_SIGNAL_CHART_WIDTH_SPACER,
+        )
+        self.assertEqual(len(embed.kwargs["description"]), 64)
+        self.assertEqual(embed.image_url, "attachment://original.png")
+
 
 class PostSignalReviewLifecycleTests(unittest.TestCase):
     def setUp(self):
