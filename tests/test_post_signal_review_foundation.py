@@ -94,6 +94,232 @@ class PostSignalReviewRecordTests(unittest.TestCase):
             "Weekly resistance rejection.",
         )
 
+    def test_due_check_requires_scheduled_valid_record_and_aware_time(self):
+        record = self.build_record()
+        self.assertFalse(
+            earnings_reactions.is_due_post_signal_review(
+                record,
+                earnings_reactions.datetime.fromisoformat(
+                    "2026-09-11T09:29:59-04:00"
+                ),
+            )
+        )
+        self.assertTrue(
+            earnings_reactions.is_due_post_signal_review(
+                record,
+                earnings_reactions.datetime.fromisoformat(
+                    "2026-09-11T09:30:00-04:00"
+                ),
+            )
+        )
+        record["review_status"] = earnings_reactions.POST_SIGNAL_REVIEW_DRAFT_READY
+        self.assertFalse(
+            earnings_reactions.is_due_post_signal_review(
+                record,
+                earnings_reactions.datetime.fromisoformat(
+                    "2026-09-12T09:30:00-04:00"
+                ),
+            )
+        )
+
+    def test_review_card_preserves_direction_thesis_and_verification_gate(self):
+        record = self.build_record()
+        message = earnings_reactions.build_post_signal_review_message(
+            record,
+            earnings_reactions.datetime.fromisoformat(
+                "2026-09-11T09:30:00-04:00"
+            ),
+            private=True,
+        )
+        self.assertIn("ROAD — Short", message)
+        self.assertIn("Weekly resistance rejection.", message)
+        self.assertIn("Still Active", message)
+        self.assertIn("requires staff verification", message)
+        self.assertIn("not a claim of realized profit", message)
+
+
+class PostSignalReviewLifecycleTests(unittest.TestCase):
+    def setUp(self):
+        self.record = PostSignalReviewRecordTests().build_record()
+        self.state = {
+            "public": {},
+            "private": {},
+            "quotes": {},
+            "signal_queue": {},
+            "manual_signal_drafts": {},
+            "post_signal_reviews": {"900": copy.deepcopy(self.record)},
+        }
+
+    def transactional_update(self, mutation):
+        latest = copy.deepcopy(self.state)
+        result = mutation(latest)
+        self.state = latest
+        return copy.deepcopy(latest), result
+
+    def patch_update(self):
+        return patch.object(
+            earnings_reactions,
+            "update_state",
+            side_effect=self.transactional_update,
+        )
+
+    def claim_due(self):
+        with self.patch_update():
+            _state, outcome = earnings_reactions.claim_due_post_signal_review(
+                "900",
+                "draft-attempt",
+                "2026-09-11T09:30:00-04:00",
+            )
+        self.assertEqual(outcome, "claimed")
+
+    def mark_draft_ready(self, verified=False):
+        self.claim_due()
+        with self.patch_update():
+            _state, outcome = earnings_reactions.transition_post_signal_review(
+                "900",
+                "draft-attempt",
+                earnings_reactions.POST_SIGNAL_REVIEW_DRAFT_READY,
+                "2026-09-11T09:31:00-04:00",
+                updates={
+                    "draft_channel_id": "700",
+                    "draft_message_id": "800",
+                    "comparison_chart_filename": "ROAD_review.png",
+                    "comparison_chart_verified": verified,
+                },
+            )
+        self.assertEqual(outcome, "transitioned")
+
+    def test_due_claim_is_single_winner(self):
+        self.claim_due()
+        with self.patch_update():
+            _state, outcome = earnings_reactions.claim_due_post_signal_review(
+                "900",
+                "second-attempt",
+                "2026-09-11T09:30:01-04:00",
+            )
+        self.assertEqual(outcome, "not_due")
+        self.assertEqual(
+            self.state["post_signal_reviews"]["900"]["review_attempt_id"],
+            "draft-attempt",
+        )
+
+    def test_publish_is_blocked_until_comparison_chart_is_verified(self):
+        self.mark_draft_ready(verified=False)
+        with self.patch_update():
+            _state, outcome = earnings_reactions.claim_post_signal_review_action(
+                "900",
+                "800",
+                "publish-attempt",
+                earnings_reactions.POST_SIGNAL_REVIEW_PUBLISHING,
+                "2026-09-11T09:35:00-04:00",
+            )
+        self.assertEqual(outcome, "verification_required")
+        self.assertEqual(
+            self.state["post_signal_reviews"]["900"]["review_status"],
+            earnings_reactions.POST_SIGNAL_REVIEW_DRAFT_READY,
+        )
+
+    def test_edit_can_verify_chart_and_set_outcome(self):
+        self.mark_draft_ready()
+        with self.patch_update():
+            _state, outcome = earnings_reactions.edit_post_signal_review(
+                "900",
+                "800",
+                "2026-09-11T09:35:00-04:00",
+                outcome="worked",
+                summary="The original rejection level held and price moved lower.",
+                comparison_chart_verified=True,
+            )
+        self.assertEqual(outcome, "updated")
+        record = self.state["post_signal_reviews"]["900"]
+        self.assertEqual(record["proposed_outcome"], "worked")
+        self.assertTrue(record["comparison_chart_verified"])
+        self.assertEqual(record["review_history"][-1]["action"], "edited")
+
+    def test_publish_and_defer_cannot_both_win(self):
+        self.mark_draft_ready(verified=True)
+        with self.patch_update():
+            _state, publish = earnings_reactions.claim_post_signal_review_action(
+                "900",
+                "800",
+                "publish-attempt",
+                earnings_reactions.POST_SIGNAL_REVIEW_PUBLISHING,
+                "2026-09-11T09:35:00-04:00",
+            )
+            _state, deferred = earnings_reactions.defer_post_signal_review(
+                "900",
+                "800",
+                "2026-09-11T09:35:01-04:00",
+            )
+        self.assertEqual(publish, "claimed")
+        self.assertEqual(deferred, "unavailable")
+        self.assertEqual(
+            self.state["post_signal_reviews"]["900"]["review_history"][-1]["action"],
+            "publish_started",
+        )
+
+    def test_deferral_schedules_one_calendar_month_and_preserves_audit(self):
+        self.mark_draft_ready()
+        with self.patch_update():
+            _state, outcome = earnings_reactions.defer_post_signal_review(
+                "900",
+                "800",
+                "2026-09-30T10:00:00-04:00",
+            )
+        self.assertEqual(outcome, "deferred")
+        record = self.state["post_signal_reviews"]["900"]
+        self.assertEqual(record["review_due_at"], "2026-10-30T10:00:00-04:00")
+        self.assertEqual(record["review_cycle"], 2)
+        self.assertEqual(record["deferral_count"], 1)
+        self.assertEqual(record["review_history"][-1]["action"], "deferred")
+        self.assertNotIn("draft_message_id", record)
+
+    def test_stale_attempt_cannot_confirm_publication(self):
+        self.mark_draft_ready(verified=True)
+        with self.patch_update():
+            earnings_reactions.claim_post_signal_review_action(
+                "900",
+                "800",
+                "publish-attempt",
+                earnings_reactions.POST_SIGNAL_REVIEW_PUBLISHING,
+                "2026-09-11T09:35:00-04:00",
+            )
+            _state, outcome = earnings_reactions.transition_post_signal_review(
+                "900",
+                "stale-attempt",
+                earnings_reactions.POST_SIGNAL_REVIEW_PUBLISHED,
+                "2026-09-11T09:36:00-04:00",
+                updates={"public_channel_id": "600", "public_message_id": "601"},
+            )
+        self.assertEqual(outcome, "stale")
+        self.assertEqual(
+            self.state["post_signal_reviews"]["900"]["review_status"],
+            earnings_reactions.POST_SIGNAL_REVIEW_PUBLISHING,
+        )
+
+    def test_publication_confirmation_requires_a_message_id(self):
+        self.mark_draft_ready(verified=True)
+        with self.patch_update():
+            earnings_reactions.claim_post_signal_review_action(
+                "900",
+                "800",
+                "publish-attempt",
+                earnings_reactions.POST_SIGNAL_REVIEW_PUBLISHING,
+                "2026-09-11T09:35:00-04:00",
+            )
+            _state, outcome = earnings_reactions.transition_post_signal_review(
+                "900",
+                "publish-attempt",
+                earnings_reactions.POST_SIGNAL_REVIEW_PUBLISHED,
+                "2026-09-11T09:36:00-04:00",
+                updates={"public_channel_id": "600", "public_message_id": None},
+            )
+        self.assertEqual(outcome, "invalid")
+        self.assertEqual(
+            self.state["post_signal_reviews"]["900"]["review_status"],
+            earnings_reactions.POST_SIGNAL_REVIEW_PUBLISHING,
+        )
+
 
 class TransactionalReviewCaptureTests(unittest.TestCase):
     def setUp(self):

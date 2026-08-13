@@ -140,6 +140,27 @@ TRADE_DIRECTIONS = {
 }
 
 POST_SIGNAL_REVIEW_SCHEDULED = "scheduled"
+POST_SIGNAL_REVIEW_DRAFTING = "drafting"
+POST_SIGNAL_REVIEW_DRAFT_READY = "draft_ready"
+POST_SIGNAL_REVIEW_PUBLISHING = "publishing"
+POST_SIGNAL_REVIEW_PUBLISHED = "published"
+POST_SIGNAL_REVIEW_DISMISSED = "dismissed"
+POST_SIGNAL_REVIEW_UNKNOWN = "unknown"
+POST_SIGNAL_REVIEW_STATUSES = {
+    POST_SIGNAL_REVIEW_SCHEDULED,
+    POST_SIGNAL_REVIEW_DRAFTING,
+    POST_SIGNAL_REVIEW_DRAFT_READY,
+    POST_SIGNAL_REVIEW_PUBLISHING,
+    POST_SIGNAL_REVIEW_PUBLISHED,
+    POST_SIGNAL_REVIEW_DISMISSED,
+    POST_SIGNAL_REVIEW_UNKNOWN,
+}
+POST_SIGNAL_OUTCOMES = {
+    "still_active": "Still Active",
+    "worked": "Worked",
+    "invalidated": "Invalidated",
+    "no_clear_follow_through": "No Clear Follow-Through",
+}
 POST_SIGNAL_REVIEW_SOURCE_EARNINGS = "earnings"
 POST_SIGNAL_REVIEW_SOURCE_MANUAL = "manual"
 POST_SIGNAL_REVIEW_SOURCES = {
@@ -1992,6 +2013,34 @@ def one_calendar_month_after(value: Any) -> str:
     ).isoformat()
 
 
+def normalized_post_signal_outcome(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    outcome = value.strip().lower()
+    return outcome if outcome in POST_SIGNAL_OUTCOMES else None
+
+
+def is_due_post_signal_review(value: Any, now: datetime) -> bool:
+    if not is_valid_post_signal_review_record(value):
+        return False
+    due_at = parse_iso_datetime(value.get("review_due_at"))
+    if due_at is None:
+        return False
+    if now.tzinfo is None:
+        return False
+    return (
+        value.get("review_status") == POST_SIGNAL_REVIEW_SCHEDULED
+        and due_at <= now
+    )
+
+
+def post_signal_review_elapsed_days(value: Any, now: datetime) -> int:
+    sent_at = parse_iso_datetime(value)
+    if sent_at is None or now.tzinfo is None:
+        raise ValueError("Review dates must be timezone-aware ISO datetimes.")
+    return max(0, (now - sent_at).days)
+
+
 def build_post_signal_review_record(
     *,
     source: str,
@@ -2043,6 +2092,11 @@ def build_post_signal_review_record(
         "review_due_at": one_calendar_month_after(normalized_sent_at),
         "review_status": POST_SIGNAL_REVIEW_SCHEDULED,
         "review_cycle": 1,
+        "deferral_count": 0,
+        "review_history": [],
+        "proposed_outcome": "still_active",
+        "review_summary": "",
+        "comparison_chart_verified": False,
         "created_at": normalized_sent_at,
         "updated_at": normalized_sent_at,
     }
@@ -2055,9 +2109,9 @@ def is_valid_post_signal_review_record(value: Any) -> bool:
         return False
     if normalized_trade_direction(value.get("trade_direction")) is None:
         return False
-    if value.get("review_status") != POST_SIGNAL_REVIEW_SCHEDULED:
+    if value.get("review_status") not in POST_SIGNAL_REVIEW_STATUSES:
         return False
-    if value.get("review_cycle") != 1:
+    if not isinstance(value.get("review_cycle"), int) or value["review_cycle"] < 1:
         return False
     if discord_id_text(value.get("review_id")) is None:
         return False
@@ -2076,7 +2130,357 @@ def is_valid_post_signal_review_record(value: Any) -> bool:
     for field in ("sent_at", "review_due_at", "created_at", "updated_at"):
         if parse_iso_datetime(value.get(field)) is None:
             return False
+    if not isinstance(value.get("deferral_count", 0), int):
+        return False
+    if value.get("deferral_count", 0) < 0:
+        return False
+    if not isinstance(value.get("review_history", []), list):
+        return False
+    if normalized_post_signal_outcome(
+        value.get("proposed_outcome", "still_active")
+    ) is None:
+        return False
+    if not isinstance(value.get("review_summary", ""), str):
+        return False
+    if not isinstance(value.get("comparison_chart_verified", False), bool):
+        return False
+    for field in (
+        "draft_channel_id",
+        "draft_message_id",
+        "public_channel_id",
+        "public_message_id",
+    ):
+        if field in value and value[field] is not None:
+            if discord_id_text(value[field]) is None:
+                return False
     return True
+
+
+def claim_due_post_signal_review(
+    review_id: str,
+    attempt_id: str,
+    now: str,
+) -> tuple[dict[str, Any], str]:
+    def mutation(state: dict[str, Any]) -> str:
+        reviews = state.get("post_signal_reviews")
+        if not isinstance(reviews, dict):
+            return "invalid"
+        record = reviews.get(str(review_id))
+        now_datetime = parse_iso_datetime(now)
+        if not isinstance(record, dict) or now_datetime is None:
+            return "invalid"
+        if not is_due_post_signal_review(record, now_datetime):
+            return "not_due"
+        record["review_status"] = POST_SIGNAL_REVIEW_DRAFTING
+        record["review_attempt_id"] = attempt_id
+        record["updated_at"] = now_datetime.isoformat()
+        record.pop("last_error", None)
+        return "claimed"
+
+    return update_state(mutation)
+
+
+def transition_post_signal_review(
+    review_id: str,
+    attempt_id: str,
+    target_status: str,
+    now: str,
+    *,
+    updates: dict[str, Any] | None = None,
+    error: str | None = None,
+) -> tuple[dict[str, Any], str]:
+    if target_status not in POST_SIGNAL_REVIEW_STATUSES:
+        raise ValueError("Invalid post-signal review status.")
+
+    def mutation(state: dict[str, Any]) -> str:
+        reviews = state.get("post_signal_reviews")
+        record = reviews.get(str(review_id)) if isinstance(reviews, dict) else None
+        now_datetime = parse_iso_datetime(now)
+        if not isinstance(record, dict) or now_datetime is None:
+            return "invalid"
+        if target_status == POST_SIGNAL_REVIEW_PUBLISHED:
+            public_channel_id = (
+                updates.get("public_channel_id") if updates else None
+            )
+            public_message_id = (
+                updates.get("public_message_id") if updates else None
+            )
+            if (
+                discord_id_text(public_channel_id) is None
+                or discord_id_text(public_message_id) is None
+            ):
+                return "invalid"
+        if record.get("review_attempt_id") != attempt_id:
+            return "stale"
+        candidate = copy.deepcopy(record)
+        candidate["review_status"] = target_status
+        candidate["updated_at"] = now_datetime.isoformat()
+        if updates:
+            candidate.update(copy.deepcopy(updates))
+        if error:
+            candidate["last_error"] = str(error)[:240]
+        else:
+            candidate.pop("last_error", None)
+        history = copy.deepcopy(candidate.get("review_history", []))
+        history.append(
+            {
+                "action": target_status,
+                "at": now_datetime.isoformat(),
+                "review_cycle": candidate["review_cycle"],
+                **({"error": str(error)[:240]} if error else {}),
+            }
+        )
+        candidate["review_history"] = history
+        if not is_valid_post_signal_review_record(candidate):
+            return "invalid"
+        reviews[str(review_id)] = candidate
+        return "transitioned"
+
+    return update_state(mutation)
+
+
+def defer_post_signal_review(
+    review_id: str,
+    expected_draft_message_id: str,
+    now: str,
+) -> tuple[dict[str, Any], str]:
+    def mutation(state: dict[str, Any]) -> str:
+        reviews = state.get("post_signal_reviews")
+        record = reviews.get(str(review_id)) if isinstance(reviews, dict) else None
+        now_datetime = parse_iso_datetime(now)
+        if not isinstance(record, dict) or now_datetime is None:
+            return "invalid"
+        if (
+            record.get("review_status") != POST_SIGNAL_REVIEW_DRAFT_READY
+            or str(record.get("draft_message_id"))
+            != str(expected_draft_message_id)
+        ):
+            return "unavailable"
+        history = copy.deepcopy(record.get("review_history", []))
+        history.append(
+            {
+                "action": "deferred",
+                "at": now_datetime.isoformat(),
+                "review_cycle": record["review_cycle"],
+                "previous_due_at": record["review_due_at"],
+            }
+        )
+        record.update(
+            {
+                "review_status": POST_SIGNAL_REVIEW_SCHEDULED,
+                "review_due_at": one_calendar_month_after(now_datetime.isoformat()),
+                "review_cycle": record["review_cycle"] + 1,
+                "deferral_count": record.get("deferral_count", 0) + 1,
+                "review_history": history,
+                "comparison_chart_verified": False,
+                "review_summary": "",
+                "proposed_outcome": "still_active",
+                "updated_at": now_datetime.isoformat(),
+            }
+        )
+        for field in (
+            "draft_channel_id",
+            "draft_message_id",
+            "review_attempt_id",
+            "comparison_chart_filename",
+            "last_error",
+        ):
+            record.pop(field, None)
+        return "deferred" if is_valid_post_signal_review_record(record) else "invalid"
+
+    return update_state(mutation)
+
+
+def claim_post_signal_review_action(
+    review_id: str,
+    draft_message_id: str,
+    attempt_id: str,
+    target_status: str,
+    now: str,
+) -> tuple[dict[str, Any], str]:
+    if target_status not in {
+        POST_SIGNAL_REVIEW_PUBLISHING,
+        POST_SIGNAL_REVIEW_DISMISSED,
+    }:
+        raise ValueError("Invalid post-signal review action.")
+
+    def mutation(state: dict[str, Any]) -> str:
+        reviews = state.get("post_signal_reviews")
+        record = reviews.get(str(review_id)) if isinstance(reviews, dict) else None
+        now_datetime = parse_iso_datetime(now)
+        if not isinstance(record, dict) or now_datetime is None:
+            return "invalid"
+        if (
+            record.get("review_status") != POST_SIGNAL_REVIEW_DRAFT_READY
+            or str(record.get("draft_message_id")) != str(draft_message_id)
+        ):
+            return "unavailable"
+        if (
+            target_status == POST_SIGNAL_REVIEW_PUBLISHING
+            and not record.get("comparison_chart_verified")
+        ):
+            return "verification_required"
+        history = copy.deepcopy(record.get("review_history", []))
+        history.append(
+            {
+                "action": (
+                    "publish_started"
+                    if target_status == POST_SIGNAL_REVIEW_PUBLISHING
+                    else "dismissed"
+                ),
+                "at": now_datetime.isoformat(),
+                "review_cycle": record["review_cycle"],
+            }
+        )
+        record["review_status"] = target_status
+        record["review_attempt_id"] = attempt_id
+        record["review_history"] = history
+        record["updated_at"] = now_datetime.isoformat()
+        return "claimed"
+
+    return update_state(mutation)
+
+
+def edit_post_signal_review(
+    review_id: str,
+    draft_message_id: str,
+    now: str,
+    *,
+    outcome: str,
+    summary: str,
+    comparison_chart_verified: bool,
+) -> tuple[dict[str, Any], str]:
+    normalized_outcome = normalized_post_signal_outcome(outcome)
+    clean_summary = str(summary or "").strip()
+    if normalized_outcome is None or not clean_summary or len(clean_summary) > 1200:
+        return load_state(), "invalid"
+
+    def mutation(state: dict[str, Any]) -> str:
+        reviews = state.get("post_signal_reviews")
+        record = reviews.get(str(review_id)) if isinstance(reviews, dict) else None
+        now_datetime = parse_iso_datetime(now)
+        if not isinstance(record, dict) or now_datetime is None:
+            return "invalid"
+        if (
+            record.get("review_status") != POST_SIGNAL_REVIEW_DRAFT_READY
+            or str(record.get("draft_message_id")) != str(draft_message_id)
+        ):
+            return "unavailable"
+        record["proposed_outcome"] = normalized_outcome
+        record["review_summary"] = clean_summary
+        record["comparison_chart_verified"] = bool(comparison_chart_verified)
+        history = copy.deepcopy(record.get("review_history", []))
+        history.append(
+            {
+                "action": "edited",
+                "at": now_datetime.isoformat(),
+                "review_cycle": record["review_cycle"],
+                "outcome": normalized_outcome,
+                "comparison_chart_verified": bool(comparison_chart_verified),
+            }
+        )
+        record["review_history"] = history
+        record["updated_at"] = now_datetime.isoformat()
+        return "updated" if is_valid_post_signal_review_record(record) else "invalid"
+
+    return update_state(mutation)
+
+
+def find_post_signal_review_by_draft(
+    state: dict[str, Any],
+    draft_channel_id: Any,
+    draft_message_id: Any,
+) -> tuple[str, dict[str, Any]] | None:
+    channel_id = discord_id_text(draft_channel_id)
+    message_id = discord_id_text(draft_message_id)
+    reviews = state.get("post_signal_reviews")
+    if channel_id is None or message_id is None or not isinstance(reviews, dict):
+        return None
+    matches = [
+        (str(review_id), record)
+        for review_id, record in reviews.items()
+        if isinstance(record, dict)
+        and record.get("review_status") == POST_SIGNAL_REVIEW_DRAFT_READY
+        and str(record.get("draft_channel_id")) == channel_id
+        and str(record.get("draft_message_id")) == message_id
+        and is_valid_post_signal_review_record(record)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def build_post_signal_review_message(
+    record: dict[str, Any],
+    now: datetime,
+    *,
+    private: bool,
+) -> str:
+    if not is_valid_post_signal_review_record(record):
+        raise ValueError("Post-signal review record is invalid.")
+    outcome = normalized_post_signal_outcome(
+        record.get("proposed_outcome", "still_active")
+    )
+    if outcome is None:
+        raise ValueError("Post-signal review outcome is invalid.")
+    sent_at = parse_iso_datetime(record["sent_at"])
+    if sent_at is None or now.tzinfo is None:
+        raise ValueError("Post-signal review dates are invalid.")
+    direction = normalized_trade_direction(record["trade_direction"])
+    direction_label = "Long" if direction == TRADE_DIRECTION_LONG else "Short"
+    elapsed_days = post_signal_review_elapsed_days(record["sent_at"], now)
+    summary = str(record.get("review_summary") or "").strip()
+    if not summary:
+        summary = (
+            "Pending staff review of the updated chart and original marked levels."
+            if private
+            else "The updated chart was reviewed against the original setup."
+        )
+    verification = (
+        "✅ Updated chart verified by staff."
+        if record.get("comparison_chart_verified")
+        else "⚠️ Updated chart requires staff verification before publishing."
+    )
+    lines = [
+        "# 📊 Signal Review",
+        "",
+        f"## {record['symbol']} — {direction_label}",
+        "",
+        f"📅 **Original signal:** {sent_at.strftime('%B %d, %Y')}",
+        f"🔎 **Review date:** {now.strftime('%B %d, %Y')}",
+        f"⏳ **Time elapsed:** {elapsed_days} days",
+        f"📌 **Status:** {POST_SIGNAL_OUTCOMES[outcome]}",
+        "",
+        "## 🧠 Original Thesis",
+        "",
+        record["trade_thesis"],
+        "",
+        "## 📝 Review Summary",
+        "",
+        summary,
+        "",
+        verification,
+        "",
+        "## 🖼️ Before & After",
+        "",
+        "The complete original Signals chart appears first, followed by the updated weekly chart.",
+        "",
+        "*Market movement is informational and is not a claim of realized profit.*",
+        "",
+        "⚠️ **Manage risk. This is not financial advice.**",
+    ]
+    return "\n".join(lines)
+
+
+def build_post_signal_chart_embed(
+    discord_module: Any,
+    title: str,
+    image_url: str,
+) -> Any:
+    embed = discord_module.Embed(
+        title=title,
+        color=BRAND_NEON_PINK,
+    )
+    embed.set_image(url=image_url)
+    return embed
 
 
 def store_post_signal_review(
@@ -3145,10 +3549,27 @@ async def run_review_button_bot() -> None:
             "SIGNAL_DRAFTS_CHANNEL_ID must be a Discord channel ID."
         ) from exc
 
+    def optional_channel_id(name: str) -> int | None:
+        raw_value = os.getenv(name, "").strip()
+        if not raw_value:
+            return None
+        try:
+            return int(raw_value)
+        except ValueError as exc:
+            raise RuntimeError(f"{name} must be a Discord channel ID.") from exc
+
+    signal_review_drafts_channel_id = optional_channel_id(
+        "SIGNAL_REVIEW_DRAFTS_CHANNEL_ID"
+    )
+    signal_reviews_channel_id = optional_channel_id(
+        "SIGNAL_REVIEWS_CHANNEL_ID"
+    )
+
     intents = discord.Intents.default()
     client = discord.Client(intents=intents)
     command_tree = discord.app_commands.CommandTree(client)
     command_sync_attempted = False
+    post_signal_review_task_started = False
 
     async def get_bot_log_channel():
         """
@@ -3311,6 +3732,564 @@ async def run_review_button_bot() -> None:
         except discord.InteractionResponded:
             pass
 
+    class PostSignalReviewEditModal(
+        discord.ui.Modal,
+        title="Edit Signal Review",
+    ):
+        outcome = discord.ui.TextInput(
+            label="Outcome",
+            placeholder="still_active, worked, invalidated, or no_clear_follow_through",
+            required=True,
+            max_length=40,
+        )
+        summary = discord.ui.TextInput(
+            label="Review summary",
+            style=discord.TextStyle.paragraph,
+            required=True,
+            max_length=1200,
+        )
+        chart_verified = discord.ui.TextInput(
+            label="Updated chart verified?",
+            placeholder="Type YES only after checking levels and line anchors",
+            required=True,
+            max_length=3,
+        )
+        comparison_chart = discord.ui.FileUpload(
+            custom_id="post_signal_review_comparison_chart",
+            required=False,
+            min_values=0,
+            max_values=1,
+        )
+
+        def __init__(self, review_id: str, draft_message_id: str, record: dict[str, Any]):
+            super().__init__()
+            self.review_id = review_id
+            self.draft_message_id = draft_message_id
+            self.symbol = str(record.get("symbol") or "Signal")
+            self.outcome.default = str(record.get("proposed_outcome") or "still_active")
+            self.summary.default = str(record.get("review_summary") or "")
+            self.chart_verified.default = (
+                "YES" if record.get("comparison_chart_verified") else "NO"
+            )
+            self.add_item(
+                discord.ui.Label(
+                    text="Corrected comparison chart (optional)",
+                    description=(
+                        "Upload PNG, JPG, JPEG, or WEBP; blank keeps the current chart."
+                    ),
+                    component=self.comparison_chart,
+                )
+            )
+
+        async def on_submit(self, interaction: Any) -> None:
+            if not can_clear_earnings_review(interaction.user, interaction.guild):
+                await send_ephemeral_rejection(interaction, "You cannot edit this review.")
+                return
+            uploads = list(self.comparison_chart.values)
+            if uploads and (
+                len(uploads) != 1
+                or not is_valid_manual_chart_attachment(uploads[0])
+            ):
+                await send_ephemeral_rejection(
+                    interaction,
+                    "Upload one PNG, JPG, JPEG, or WEBP comparison chart.",
+                )
+                return
+            replacement_file = None
+            replacement_filename = None
+            if uploads:
+                suffix = Path(uploads[0].filename).suffix.lower()
+                replacement_filename = f"{self.symbol}_review{suffix}"
+                try:
+                    replacement_file = await uploads[0].to_file(
+                        filename=replacement_filename
+                    )
+                except Exception:
+                    await send_ephemeral_rejection(
+                        interaction,
+                        "The corrected chart could not be prepared; no review changes were saved.",
+                    )
+                    return
+            try:
+                latest, outcome = edit_post_signal_review(
+                    self.review_id,
+                    self.draft_message_id,
+                    datetime.now(EASTERN).isoformat(),
+                    outcome=str(self.outcome),
+                    summary=str(self.summary),
+                    comparison_chart_verified=str(self.chart_verified).strip().upper() == "YES",
+                )
+            except EarningsStateError:
+                outcome = "invalid"
+                latest = {}
+            if outcome != "updated":
+                await send_ephemeral_rejection(interaction, "This review could not be updated.")
+                return
+            record = latest["post_signal_reviews"][self.review_id]
+            existing_embeds = list(
+                getattr(getattr(interaction, "message", None), "embeds", []) or []
+            )
+            content_embed = discord.Embed.from_dict(
+                bordered_embed(
+                    build_post_signal_review_message(
+                        record,
+                        datetime.now(EASTERN),
+                        private=True,
+                    ),
+                    color=BRAND_NEON_PINK,
+                )
+            )
+            if replacement_file is None:
+                await interaction.response.edit_message(
+                    embeds=[content_embed, *existing_embeds[1:]],
+                    view=PostSignalReviewView(),
+                )
+            else:
+                original_embed = existing_embeds[1] if len(existing_embeds) > 1 else None
+                comparison_embed = build_post_signal_chart_embed(
+                    discord,
+                    "Updated Weekly Chart — Staff Verified",
+                    f"attachment://{replacement_filename}",
+                )
+                await interaction.response.edit_message(
+                    embeds=[
+                        content_embed,
+                        *([original_embed] if original_embed is not None else []),
+                        comparison_embed,
+                    ],
+                    attachments=[replacement_file],
+                    view=PostSignalReviewView(),
+                )
+
+    class PostSignalReviewView(discord.ui.View):
+        def __init__(self):
+            super().__init__(timeout=None)
+
+        async def resolve(self, interaction: Any):
+            if (
+                signal_review_drafts_channel_id is None
+                or not can_clear_earnings_review(interaction.user, interaction.guild)
+                or discord_id_text(interaction.channel_id)
+                != str(signal_review_drafts_channel_id)
+            ):
+                return None
+            message = getattr(interaction, "message", None)
+            if message is None:
+                return None
+            try:
+                state = load_state()
+            except EarningsStateError:
+                return None
+            found = find_post_signal_review_by_draft(
+                state,
+                interaction.channel_id,
+                getattr(message, "id", None),
+            )
+            return (*found, message) if found is not None else None
+
+        @discord.ui.button(
+            label="Publish Review",
+            style=discord.ButtonStyle.success,
+            custom_id="post_signal_review_publish",
+            row=0,
+        )
+        async def publish(self, interaction: Any, button: Any) -> None:
+            message_id = str(getattr(getattr(interaction, "message", None), "id", ""))
+            async with post_signal_review_locks.hold(message_id):
+                resolved = await self.resolve(interaction)
+                if resolved is None or signal_reviews_channel_id is None:
+                    await send_ephemeral_rejection(interaction, "This review is unavailable.")
+                    return
+                review_id, record, draft_message = resolved
+                attempt_id = uuid.uuid4().hex
+                now = datetime.now(EASTERN).isoformat()
+                try:
+                    _state, outcome = claim_post_signal_review_action(
+                        review_id,
+                        message_id,
+                        attempt_id,
+                        POST_SIGNAL_REVIEW_PUBLISHING,
+                        now,
+                    )
+                except EarningsStateError:
+                    outcome = "invalid"
+                if outcome == "verification_required":
+                    await send_ephemeral_rejection(
+                        interaction,
+                        "Verify the updated chart in Edit before publishing.",
+                    )
+                    return
+                if outcome != "claimed":
+                    await send_ephemeral_rejection(interaction, "This review is already being handled.")
+                    return
+                await defer_ephemeral_response(interaction)
+                try:
+                    public_channel = client.get_channel(signal_reviews_channel_id)
+                    if public_channel is None:
+                        public_channel = await client.fetch_channel(signal_reviews_channel_id)
+                    attachments = list(getattr(draft_message, "attachments", []) or [])
+                    if len(attachments) != 1:
+                        raise DefiniteDeliveryError("comparison chart unavailable")
+                    original_chart_url = await resolve_original_signal_chart_url(
+                        record
+                    )
+                    original_chart_bytes = await asyncio.to_thread(
+                        download_manual_chart_bytes,
+                        original_chart_url,
+                    )
+                    original_file = discord.File(
+                        io.BytesIO(original_chart_bytes),
+                        filename=f"{record['symbol']}_original.png",
+                    )
+                    comparison_file = await attachments[0].to_file(
+                        filename=f"{record['symbol']}_review.png"
+                    )
+                    content_embed = discord.Embed.from_dict(
+                        bordered_embed(
+                            build_post_signal_review_message(
+                                record,
+                                datetime.now(EASTERN),
+                                private=False,
+                            ),
+                            color=BRAND_NEON_PINK,
+                        )
+                    )
+                    original_embed = build_post_signal_chart_embed(
+                        discord,
+                        "Original Signal Chart",
+                        f"attachment://{record['symbol']}_original.png",
+                    )
+                    comparison_embed = build_post_signal_chart_embed(
+                        discord,
+                        "Updated Weekly Chart",
+                        f"attachment://{record['symbol']}_review.png",
+                    )
+                    public_message = await public_channel.send(
+                        embeds=[content_embed, original_embed, comparison_embed],
+                        files=[original_file, comparison_file],
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+                except (discord.Forbidden, DefiniteDeliveryError):
+                    transition_post_signal_review(
+                        review_id,
+                        attempt_id,
+                        POST_SIGNAL_REVIEW_DRAFT_READY,
+                        datetime.now(EASTERN).isoformat(),
+                        error="public_delivery_failed",
+                    )
+                    await send_ephemeral_rejection(interaction, "The review was not published.")
+                    return
+                except Exception:
+                    transition_post_signal_review(
+                        review_id,
+                        attempt_id,
+                        POST_SIGNAL_REVIEW_UNKNOWN,
+                        datetime.now(EASTERN).isoformat(),
+                        error="public_delivery_ambiguous",
+                    )
+                    await send_ephemeral_rejection(
+                        interaction,
+                        "Publication is ambiguous. Do not retry until staff reconcile it.",
+                    )
+                    return
+                public_message_id = discord_id_text(getattr(public_message, "id", None))
+                try:
+                    _state, confirmed = transition_post_signal_review(
+                        review_id,
+                        attempt_id,
+                        POST_SIGNAL_REVIEW_PUBLISHED,
+                        datetime.now(EASTERN).isoformat(),
+                        updates={
+                            "public_channel_id": str(signal_reviews_channel_id),
+                            "public_message_id": public_message_id,
+                            "published_at": datetime.now(EASTERN).isoformat(),
+                        },
+                    )
+                except EarningsStateError:
+                    confirmed = "invalid"
+                if confirmed != "transitioned":
+                    await send_ephemeral_rejection(
+                        interaction,
+                        "Discord accepted the review but confirmation failed. Do not retry.",
+                    )
+                    return
+                try:
+                    await draft_message.delete()
+                except discord.NotFound:
+                    pass
+                except Exception:
+                    await send_ephemeral_rejection(
+                        interaction,
+                        "The review was published; its private draft needs manual cleanup.",
+                    )
+
+        @discord.ui.button(
+            label="Edit",
+            style=discord.ButtonStyle.primary,
+            custom_id="post_signal_review_edit",
+            row=0,
+        )
+        async def edit(self, interaction: Any, button: Any) -> None:
+            resolved = await self.resolve(interaction)
+            if resolved is None:
+                await send_ephemeral_rejection(interaction, "This review is unavailable.")
+                return
+            review_id, record, message = resolved
+            await interaction.response.send_modal(
+                PostSignalReviewEditModal(review_id, str(message.id), record)
+            )
+
+        @discord.ui.button(
+            label="Review in 1 Month",
+            style=discord.ButtonStyle.secondary,
+            custom_id="post_signal_review_defer",
+            row=0,
+        )
+        async def defer_review(self, interaction: Any, button: Any) -> None:
+            resolved = await self.resolve(interaction)
+            if resolved is None:
+                await send_ephemeral_rejection(interaction, "This review is unavailable.")
+                return
+            review_id, _record, message = resolved
+            try:
+                _state, outcome = defer_post_signal_review(
+                    review_id,
+                    str(message.id),
+                    datetime.now(EASTERN).isoformat(),
+                )
+            except EarningsStateError:
+                outcome = "invalid"
+            if outcome != "deferred":
+                await send_ephemeral_rejection(interaction, "The review was not rescheduled.")
+                return
+            await interaction.response.send_message(
+                "Review rescheduled for one calendar month from today.",
+                ephemeral=True,
+            )
+            try:
+                await message.delete()
+            except discord.NotFound:
+                pass
+            except Exception:
+                await write_bot_log(
+                    f"Signal Review {review_id} was deferred but its draft needs manual cleanup."
+                )
+
+        @discord.ui.button(
+            label="Dismiss",
+            style=discord.ButtonStyle.danger,
+            custom_id="post_signal_review_dismiss",
+            row=0,
+        )
+        async def dismiss(self, interaction: Any, button: Any) -> None:
+            resolved = await self.resolve(interaction)
+            if resolved is None:
+                await send_ephemeral_rejection(interaction, "This review is unavailable.")
+                return
+            review_id, _record, message = resolved
+            attempt_id = uuid.uuid4().hex
+            try:
+                _state, outcome = claim_post_signal_review_action(
+                    review_id,
+                    str(message.id),
+                    attempt_id,
+                    POST_SIGNAL_REVIEW_DISMISSED,
+                    datetime.now(EASTERN).isoformat(),
+                )
+            except EarningsStateError:
+                outcome = "invalid"
+            if outcome != "claimed":
+                await send_ephemeral_rejection(interaction, "This review is unavailable.")
+                return
+            await interaction.response.send_message("Review dismissed.", ephemeral=True)
+            try:
+                await message.delete()
+            except discord.NotFound:
+                pass
+            except Exception:
+                await write_bot_log(
+                    f"Signal Review {review_id} was dismissed but its draft needs manual cleanup."
+                )
+
+    async def resolve_original_signal_chart_url(record: dict[str, Any]) -> str:
+        signal_channel = client.get_channel(int(record["signals_channel_id"]))
+        if signal_channel is None:
+            signal_channel = await client.fetch_channel(
+                int(record["signals_channel_id"])
+            )
+        signal_message = await signal_channel.fetch_message(
+            int(record["signals_message_id"])
+        )
+        attachments = list(getattr(signal_message, "attachments", []) or [])
+        if len(attachments) == 1:
+            url = str(getattr(attachments[0], "url", "") or "")
+            if url:
+                return url
+        for embed in list(getattr(signal_message, "embeds", []) or []):
+            image = getattr(embed, "image", None)
+            url = str(getattr(image, "url", "") or "")
+            if url:
+                return url
+        raise DefiniteDeliveryError("Original Signals chart is unavailable.")
+
+    async def create_due_post_signal_review_draft(
+        review_id: str,
+        record: dict[str, Any],
+    ) -> None:
+        if signal_review_drafts_channel_id is None:
+            return
+        attempt_id = uuid.uuid4().hex
+        now = datetime.now(EASTERN)
+        try:
+            _state, outcome = claim_due_post_signal_review(
+                review_id,
+                attempt_id,
+                now.isoformat(),
+            )
+        except EarningsStateError:
+            return
+        if outcome != "claimed":
+            return
+        chart_path: Path | None = None
+        discord_delivery_started = False
+        try:
+            original_chart_url = await resolve_original_signal_chart_url(record)
+            chart_path = temporary_weekly_chart_path(record["symbol"])
+            chart_path = await asyncio.to_thread(
+                generate_weekly_chart,
+                record["symbol"],
+                output_path=chart_path,
+            )
+            draft_channel = client.get_channel(signal_review_drafts_channel_id)
+            if draft_channel is None:
+                draft_channel = await client.fetch_channel(
+                    signal_review_drafts_channel_id
+                )
+            comparison_filename = f"{record['symbol']}_review.png"
+            comparison_file = discord.File(
+                chart_path,
+                filename=comparison_filename,
+            )
+            content_embed = discord.Embed.from_dict(
+                bordered_embed(
+                    build_post_signal_review_message(record, now, private=True),
+                    color=BRAND_NEON_PINK,
+                )
+            )
+            original_embed = build_post_signal_chart_embed(
+                discord,
+                "Original Signal Chart",
+                original_chart_url,
+            )
+            comparison_embed = build_post_signal_chart_embed(
+                discord,
+                "Updated Weekly Chart — Staff Verification Required",
+                f"attachment://{comparison_filename}",
+            )
+            discord_delivery_started = True
+            draft_message = await draft_channel.send(
+                embeds=[content_embed, original_embed, comparison_embed],
+                file=comparison_file,
+                view=PostSignalReviewView(),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            draft_message_id = discord_id_text(getattr(draft_message, "id", None))
+            if draft_message_id is None:
+                raise AmbiguousDeliveryError("Draft message ID is unavailable.")
+            _latest, confirmation = transition_post_signal_review(
+                review_id,
+                attempt_id,
+                POST_SIGNAL_REVIEW_DRAFT_READY,
+                datetime.now(EASTERN).isoformat(),
+                updates={
+                    "draft_channel_id": str(signal_review_drafts_channel_id),
+                    "draft_message_id": draft_message_id,
+                    "comparison_chart_filename": comparison_filename,
+                    "draft_created_at": datetime.now(EASTERN).isoformat(),
+                },
+            )
+            if confirmation != "transitioned":
+                raise AmbiguousDeliveryError("Draft confirmation failed.")
+            await write_bot_log(
+                f"Signal Review **{safe_manual_signal_log_value(record['symbol'])}** "
+                "is ready for staff review."
+            )
+        except asyncio.CancelledError:
+            try:
+                transition_post_signal_review(
+                    review_id,
+                    attempt_id,
+                    (
+                        POST_SIGNAL_REVIEW_UNKNOWN
+                        if discord_delivery_started
+                        else POST_SIGNAL_REVIEW_SCHEDULED
+                    ),
+                    datetime.now(EASTERN).isoformat(),
+                    error=(
+                        "draft_delivery_cancelled"
+                        if discord_delivery_started
+                        else "draft_preparation_cancelled"
+                    ),
+                )
+            except EarningsStateError:
+                pass
+            raise
+        except AmbiguousDeliveryError:
+            try:
+                transition_post_signal_review(
+                    review_id,
+                    attempt_id,
+                    POST_SIGNAL_REVIEW_UNKNOWN,
+                    datetime.now(EASTERN).isoformat(),
+                    error="draft_delivery_ambiguous",
+                )
+            except EarningsStateError:
+                pass
+        except Exception as exc:
+            try:
+                transition_post_signal_review(
+                    review_id,
+                    attempt_id,
+                    (
+                        POST_SIGNAL_REVIEW_UNKNOWN
+                        if discord_delivery_started
+                        else POST_SIGNAL_REVIEW_SCHEDULED
+                    ),
+                    datetime.now(EASTERN).isoformat(),
+                    error=(
+                        f"draft_delivery_ambiguous:{type(exc).__name__}"
+                        if discord_delivery_started
+                        else f"draft_preparation_failed:{type(exc).__name__}"
+                    ),
+                )
+            except EarningsStateError:
+                pass
+            print("Could not create Signal Review draft:", repr(exc), flush=True)
+        finally:
+            if chart_path is not None:
+                cleanup_weekly_chart(chart_path)
+
+    async def post_signal_review_scheduler() -> None:
+        await client.wait_until_ready()
+        while not client.is_closed():
+            try:
+                now = datetime.now(EASTERN)
+                state = load_state()
+                reviews = state.get("post_signal_reviews", {})
+                due = [
+                    (str(review_id), copy.deepcopy(record))
+                    for review_id, record in reviews.items()
+                    if is_due_post_signal_review(record, now)
+                ] if isinstance(reviews, dict) else []
+                due.sort(key=lambda pair: pair[1]["review_due_at"])
+                for review_id, record in due:
+                    await create_due_post_signal_review_draft(review_id, record)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print("Signal Review scheduler error:", repr(exc), flush=True)
+            await asyncio.sleep(3600)
+
     class SentEarningsReviewView(
         discord.ui.View,
     ):
@@ -3361,6 +4340,7 @@ async def run_review_button_bot() -> None:
 
     review_submission_locks = ReviewMessageAsyncLocks()
     manual_draft_locks = ReviewMessageAsyncLocks()
+    post_signal_review_locks = ReviewMessageAsyncLocks()
 
     class ManualSignalClosedView(discord.ui.View):
         def __init__(self, label: str):
@@ -5022,7 +6002,7 @@ async def run_review_button_bot() -> None:
 
     @client.event
     async def on_ready():
-        nonlocal command_sync_attempted
+        nonlocal command_sync_attempted, post_signal_review_task_started
 
         if not command_sync_attempted:
             command_sync_attempted = True
@@ -5041,6 +6021,15 @@ async def run_review_button_bot() -> None:
                     "slash command(s).",
                     flush=True,
                 )
+
+        if (
+            signal_review_drafts_channel_id is not None
+            and signal_reviews_channel_id is not None
+            and not post_signal_review_task_started
+        ):
+            post_signal_review_task_started = True
+            asyncio.create_task(post_signal_review_scheduler())
+            print("Post-Signal Review scheduler started.", flush=True)
 
         print(
             "Earnings Review workflow bot connected as "
@@ -5071,6 +6060,11 @@ async def run_review_button_bot() -> None:
     # review messages are posted by a separate process through REST.
     client.add_view(ManualSignalDraftView())
     client.add_view(EarningsReviewView())
+    if (
+        signal_review_drafts_channel_id is not None
+        and signal_reviews_channel_id is not None
+    ):
+        client.add_view(PostSignalReviewView())
 
     await client.start(bot_token)
 
