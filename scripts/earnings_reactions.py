@@ -168,6 +168,11 @@ POST_SIGNAL_REVIEW_SOURCES = {
     POST_SIGNAL_REVIEW_SOURCE_EARNINGS,
     POST_SIGNAL_REVIEW_SOURCE_MANUAL,
 }
+# Discord sizes image-only embeds more narrowly than text-rich embeds. A line of
+# visually blank braille characters makes each chart embed use the same maximum
+# card width as the review text; Discord then scales the attached chart to fill
+# that wider image area.
+POST_SIGNAL_CHART_WIDTH_SPACER = "\u2800" * 64
 MANUAL_SIGNAL_IMAGE_TYPES = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -2675,6 +2680,7 @@ def build_post_signal_chart_embed(
 ) -> Any:
     embed = discord_module.Embed(
         title=title,
+        description=POST_SIGNAL_CHART_WIDTH_SPACER,
         color=BRAND_NEON_PINK,
     )
     embed.set_image(url=image_url)
