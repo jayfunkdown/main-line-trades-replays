@@ -239,10 +239,12 @@ class PostSignalReviewRecordTests(unittest.TestCase):
         deferred = source[source.index("        async def defer_review("):source.index("        async def dismiss(")]
         dismissed = source[source.index("        async def dismiss("):source.index("    async def resolve_original_signal_chart_url")]
         self.assertIn("await respond_ephemeral_now(", deferred)
-        self.assertIn("await delete_review_draft_bounded(message)", deferred)
+        self.assertIn("await delete_review_draft_bounded(", deferred)
+        self.assertIn("interaction.channel_id", deferred)
         self.assertNotIn("await defer_ephemeral_response(interaction)", deferred)
         self.assertIn("await respond_ephemeral_now(", dismissed)
-        self.assertIn("await delete_review_draft_bounded(message)", dismissed)
+        self.assertIn("await delete_review_draft_bounded(", dismissed)
+        self.assertIn("interaction.channel_id", dismissed)
         self.assertNotIn("await defer_ephemeral_response(interaction)", dismissed)
 
     def test_review_draft_delete_uses_bounded_direct_discord_request(self):
@@ -254,7 +256,7 @@ class PostSignalReviewRecordTests(unittest.TestCase):
         self.assertIn("method=\"DELETE\"", bounded)
         self.assertIn("urllib.request.urlopen(request, timeout=5)", bounded)
         self.assertIn("asyncio.to_thread(delete_directly)", bounded)
-        self.assertNotIn("message.delete()", bounded)
+        self.assertNotIn("getattr(message", bounded)
 
 
 class PostSignalReviewLifecycleTests(unittest.TestCase):
