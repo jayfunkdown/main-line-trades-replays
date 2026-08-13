@@ -981,6 +981,7 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
             await self.button(view, "manual_signal_edit").callback(open_interaction)
         modal = open_interaction.response.modal
         modal.trade_thesis._value = "Completely updated thesis"
+        modal.reference_level._value = "1.2345"
         replacement = self.attachment(
             "updated.webp", "image/webp", 502
         )
@@ -1053,6 +1054,7 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
             await self.button(view, "manual_signal_edit").callback(open_interaction)
         modal = open_interaction.response.modal
         modal.trade_thesis._value = "Losing edit"
+        modal.reference_level._value = "1.2345"
         modal.trade_chart._values = []
 
         send_started = asyncio.Event()
@@ -1118,6 +1120,7 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
             await self.button(view, "manual_signal_edit").callback(open_interaction)
         modal = open_interaction.response.modal
         modal.trade_thesis._value = "Losing edit"
+        modal.reference_level._value = "1.2345"
         modal.trade_chart._values = []
         cancel_interaction = self.interaction(client, message=message)
         edit_submit = self.interaction(client, message=message)
@@ -1197,6 +1200,8 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
             second_modal = await open_edit(second_message)
         first_modal.trade_thesis._value = "First updated"
         second_modal.trade_thesis._value = "Second updated"
+        first_modal.reference_level._value = "1.2345"
+        second_modal.reference_level._value = "1.2345"
         first_submit = self.interaction(client, message=first_message)
         second_submit = self.interaction(client, message=second_message)
         self.drafts.fetch_message.side_effect = lambda message_id: messages[message_id]
