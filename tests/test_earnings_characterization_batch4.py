@@ -24,6 +24,14 @@ class NoNetworkTestCase(unittest.TestCase):
 
 
 class ScoringAndThresholdTests(NoNetworkTestCase):
+    def test_priority_tickers_match_the_earnings_calendar_starred_list(self):
+        from scripts import morning_brief
+
+        self.assertEqual(
+            earnings_reactions.PRIORITY_TICKERS,
+            morning_brief.PRIORITY_TICKERS,
+        )
+
     def qualification_candidate(
         self,
         move,
@@ -118,11 +126,12 @@ class ScoringAndThresholdTests(NoNetworkTestCase):
 
     def test_public_thresholds_include_each_exact_boundary(self):
         cases = (
-            (self.qualification_candidate(8.0), True),
-            (self.qualification_candidate(7.999), False),
-            (self.qualification_candidate(-8.0), True),
-            (self.qualification_candidate(5.0, priority=True), True),
-            (self.qualification_candidate(4.999, priority=True), False),
+            (self.qualification_candidate(15.0), True),
+            (self.qualification_candidate(14.999), False),
+            (self.qualification_candidate(-15.0), True),
+            (self.qualification_candidate(-14.999), False),
+            (self.qualification_candidate(15.0, priority=True), True),
+            (self.qualification_candidate(14.999, priority=True), True),
             (self.qualification_candidate(None, priority=True), False),
         )
 
@@ -157,10 +166,35 @@ class ScoringAndThresholdTests(NoNetworkTestCase):
             self.assertTrue(earnings_reactions.qualifies_for_private(priority))
             self.assertFalse(earnings_reactions.qualifies_for_private(ordinary))
 
-            priority["move_percent"] = 5.0
-            ordinary["move_percent"] = 5.0
+            priority["move_percent"] = 14.999
+            ordinary["move_percent"] = 14.999
             self.assertTrue(earnings_reactions.qualifies_for_public(priority))
             self.assertFalse(earnings_reactions.qualifies_for_public(ordinary))
+
+            priority["move_percent"] = 15.0
+            ordinary["move_percent"] = 15.0
+            self.assertTrue(earnings_reactions.qualifies_for_public(priority))
+            self.assertTrue(earnings_reactions.qualifies_for_public(ordinary))
+
+    def test_public_threshold_cannot_be_configured_below_fifteen_percent(self):
+        candidate = self.qualification_candidate(14.999)
+
+        with patch.dict(
+            os.environ,
+            {"EARNINGS_PUBLIC_MOVE_PCT": "8"},
+            clear=True,
+        ):
+            self.assertFalse(
+                earnings_reactions.qualifies_for_public(candidate)
+            )
+
+    def test_priority_sorting_falls_back_to_the_candidate_symbol(self):
+        self.assertTrue(
+            earnings_reactions.is_priority_candidate({"symbol": "AAPL"})
+        )
+        self.assertFalse(
+            earnings_reactions.is_priority_candidate({"symbol": "ACME"})
+        )
 
 
 class SelectionAndLimitTests(NoNetworkTestCase):
@@ -176,6 +210,7 @@ class SelectionAndLimitTests(NoNetworkTestCase):
         private=True,
         public=True,
         report=None,
+        priority=False,
     ):
         return {
             "symbol": symbol,
@@ -183,6 +218,7 @@ class SelectionAndLimitTests(NoNetworkTestCase):
             "move_percent": move,
             "private_ok": private,
             "public_ok": public,
+            "priority": priority,
             "report": report
             or {
                 "date": self.TARGET_DATE,
@@ -342,6 +378,38 @@ class SelectionAndLimitTests(NoNetworkTestCase):
             self.preview_symbols(result),
             (["S0", "S1", "S2"], ["S0", "S1"]),
         )
+
+    def test_public_cap_prioritizes_starred_names_within_fifteen_total(self):
+        candidates = [
+            self.candidate(
+                "STARRED",
+                1.0,
+                2.0,
+                0,
+                private=False,
+                priority=True,
+            ),
+            *[
+                self.candidate(
+                    f"MOVE{index}",
+                    100.0 - index,
+                    15.0 + index,
+                    index + 1,
+                )
+                for index in range(15)
+            ],
+        ]
+
+        result = self.run_main(
+            candidates,
+            environment={"EARNINGS_PUBLIC_MAX": "20"},
+        )
+        private_symbols, public_symbols = self.preview_symbols(result)
+
+        self.assertNotIn("STARRED", private_symbols)
+        self.assertEqual(len(public_symbols), 15)
+        self.assertEqual(public_symbols[0], "STARRED")
+        self.assertNotIn("MOVE14", public_symbols)
 
     def test_public_feed_is_selected_before_private_feed_is_capped(self):
         candidates = [

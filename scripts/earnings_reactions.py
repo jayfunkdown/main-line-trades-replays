@@ -28,9 +28,8 @@ Optional configuration:
     EARNINGS_PUBLIC_MAX=15
     EARNINGS_PRIVATE_MAX=50
     EARNINGS_PRIVATE_MOVE_PCT=5
-    EARNINGS_PUBLIC_MOVE_PCT=8
+    EARNINGS_PUBLIC_MOVE_PCT=15
     EARNINGS_PRIORITY_PRIVATE_MOVE_PCT=3
-    EARNINGS_PRIORITY_PUBLIC_MOVE_PCT=5
     EARNINGS_QUOTE_DELAY_SECONDS=1.1
     EARNINGS_QUOTE_CACHE_MINUTES=20
     EARNINGS_MAX_QUOTE_CALLS_PER_RUN=120
@@ -190,54 +189,85 @@ class PublicChartPreparationCancelled(asyncio.CancelledError):
 
 PRIORITY_TICKERS = {
     "AAPL",
+    "ABBV",
     "ABNB",
+    "ABT",
     "ADBE",
     "AFRM",
+    "AI",
+    "AMAT",
     "AMD",
     "AMZN",
     "ARM",
+    "ASML",
     "AVGO",
     "BA",
+    "BABA",
     "BAC",
+    "BKNG",
+    "BLK",
     "C",
     "CAT",
+    "CCL",
+    "CELH",
+    "CMG",
     "COIN",
     "COST",
     "CRM",
     "CRWD",
     "CVNA",
+    "CVX",
     "DASH",
+    "DDOG",
+    "DE",
+    "DELL",
     "DIS",
     "DKNG",
+    "F",
+    "FDX",
+    "GE",
+    "GM",
+    "GME",
     "GOOG",
     "GOOGL",
     "GS",
     "HD",
     "HIMS",
     "HOOD",
+    "IBM",
     "INTC",
+    "JNJ",
     "JPM",
     "LLY",
     "LULU",
     "MA",
-    "MARA",
+    "MCD",
+    "MELI",
     "META",
+    "MRNA",
+    "MRVL",
     "MS",
     "MSFT",
+    "MSTR",
     "MU",
+    "NET",
     "NFLX",
+    "NIO",
     "NKE",
+    "NOW",
     "NVDA",
     "ORCL",
     "PANW",
+    "PDD",
+    "PFE",
     "PINS",
     "PLTR",
     "PYPL",
     "QCOM",
     "RBLX",
-    "RIOT",
     "RIVN",
     "ROKU",
+    "SBUX",
     "SHOP",
     "SMCI",
     "SNAP",
@@ -252,9 +282,9 @@ PRIORITY_TICKERS = {
     "UBER",
     "UNH",
     "V",
-    "WFC",
     "WMT",
     "XOM",
+    "ZM",
 }
 
 
@@ -885,22 +915,24 @@ def qualifies_for_public(
 
     absolute_move = abs(move_percent)
 
-    public_move = env_float(
-        "EARNINGS_PUBLIC_MOVE_PCT",
-        8,
+    public_move = max(
+        env_float("EARNINGS_PUBLIC_MOVE_PCT", 15),
+        15,
     )
 
-    priority_public_move = env_float(
-        "EARNINGS_PRIORITY_PUBLIC_MOVE_PCT",
-        5,
-    )
+    return is_priority_candidate(candidate) or absolute_move >= public_move
 
-    if absolute_move >= public_move:
-        return True
 
+def is_priority_candidate(candidate: dict[str, Any]) -> bool:
+    priority = candidate.get("priority")
+
+    if isinstance(priority, bool):
+        return priority
+
+    symbol = candidate.get("symbol")
     return (
-        candidate["priority"]
-        and absolute_move >= priority_public_move
+        isinstance(symbol, str)
+        and symbol.upper() in PRIORITY_TICKERS
     )
 
 
@@ -5877,10 +5909,11 @@ def main() -> None:
     public_candidates = sorted(
         [
             candidate
-            for candidate in private_candidates
+            for candidate in candidates
             if qualifies_for_public(candidate)
         ],
         key=lambda item: (
+            is_priority_candidate(item),
             item["score"],
             abs(item["move_percent"] or 0),
         ),
@@ -5892,8 +5925,8 @@ def main() -> None:
         50,
     )
 
-    public_max = env_int(
-        "EARNINGS_PUBLIC_MAX",
+    public_max = min(
+        env_int("EARNINGS_PUBLIC_MAX", 15),
         15,
     )
 
