@@ -1425,6 +1425,75 @@ def temporary_weekly_chart_path(symbol: str) -> Path:
     return chart_dir / f".{safe_symbol}_weekly_{uuid.uuid4().hex}.tmp.png"
 
 
+def combine_post_signal_review_charts(
+    original_chart: bytes | Path,
+    updated_chart: bytes | Path,
+    *,
+    output_path: Path,
+) -> Path:
+    """Build the single, vertically stacked Before/After review image."""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError as exc:
+        raise RuntimeError("Signal review chart composition requires Pillow.") from exc
+
+    def open_image(source: bytes | Path) -> Any:
+        if isinstance(source, bytes):
+            return Image.open(io.BytesIO(source)).convert("RGB")
+        return Image.open(source).convert("RGB")
+
+    original = open_image(original_chart)
+    updated = open_image(updated_chart)
+    width = max(original.width, updated.width)
+
+    def fit_width(image: Any) -> Any:
+        if image.width == width:
+            return image
+        height = max(1, round(image.height * width / image.width))
+        return image.resize((width, height), Image.Resampling.LANCZOS)
+
+    original = fit_width(original)
+    updated = fit_width(updated)
+    band_height = max(72, round(width * 0.045))
+    canvas = Image.new(
+        "RGB",
+        (width, band_height * 2 + original.height + updated.height),
+        "#05070B",
+    )
+    draw = ImageDraw.Draw(canvas)
+    try:
+        font = ImageFont.truetype("arialbd.ttf", max(24, round(width * 0.022)))
+    except OSError:
+        font = ImageFont.load_default()
+
+    def title_band(y: int, title: str) -> None:
+        draw.rectangle((0, y, width, y + band_height), fill="#0D1119")
+        draw.line(
+            (0, y + band_height - 3, width, y + band_height - 3),
+            fill="#FF2BD6",
+            width=3,
+        )
+        box = draw.textbbox((0, 0), title, font=font)
+        text_width = box[2] - box[0]
+        text_height = box[3] - box[1]
+        draw.text(
+            ((width - text_width) / 2, y + (band_height - text_height) / 2 - box[1]),
+            title,
+            fill="#F4F7FF",
+            font=font,
+        )
+
+    title_band(0, "BEFORE — ORIGINAL SIGNAL CHART")
+    original_y = band_height
+    canvas.paste(original, (0, original_y))
+    updated_title_y = original_y + original.height
+    title_band(updated_title_y, "AFTER — UPDATED WEEKLY CHART")
+    canvas.paste(updated, (0, updated_title_y + band_height))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(output_path, format="PNG", optimize=True)
+    return output_path
+
+
 def weekly_chart_filename(symbol: str) -> str:
     """Return the clean member-facing weekly chart filename."""
     safe_symbol = re.sub(r"[^A-Za-z0-9._-]", "_", symbol.upper())
@@ -3956,19 +4025,9 @@ async def run_review_button_bot() -> None:
                     attachments = list(getattr(draft_message, "attachments", []) or [])
                     if len(attachments) != 1:
                         raise DefiniteDeliveryError("comparison chart unavailable")
-                    original_chart_url = await resolve_original_signal_chart_url(
-                        record
-                    )
-                    original_chart_bytes = await asyncio.to_thread(
-                        download_manual_chart_bytes,
-                        original_chart_url,
-                    )
-                    original_file = discord.File(
-                        io.BytesIO(original_chart_bytes),
-                        filename=f"{record['symbol']}_original.png",
-                    )
-                    comparison_file = await attachments[0].to_file(
-                        filename=f"{record['symbol']}_review.png"
+                    combined_filename = f"{record['symbol']}_before_after.png"
+                    combined_file = await attachments[0].to_file(
+                        filename=combined_filename
                     )
                     content_embed = discord.Embed.from_dict(
                         bordered_embed(
@@ -3980,19 +4039,12 @@ async def run_review_button_bot() -> None:
                             color=BRAND_NEON_PINK,
                         )
                     )
-                    original_embed = build_post_signal_chart_embed(
-                        discord,
-                        "Original Signal Chart",
-                        f"attachment://{record['symbol']}_original.png",
-                    )
-                    comparison_embed = build_post_signal_chart_embed(
-                        discord,
-                        "Updated Weekly Chart",
-                        f"attachment://{record['symbol']}_review.png",
+                    content_embed.set_image(
+                        url=f"attachment://{combined_filename}"
                     )
                     public_message = await public_channel.send(
-                        embeds=[content_embed, original_embed, comparison_embed],
-                        files=[original_file, comparison_file],
+                        embed=content_embed,
+                        file=combined_file,
                         allowed_mentions=discord.AllowedMentions.none(),
                     )
                 except (discord.Forbidden, DefiniteDeliveryError):
@@ -4048,22 +4100,6 @@ async def run_review_button_bot() -> None:
                         interaction,
                         "The review was published; its private draft needs manual cleanup.",
                     )
-
-        @discord.ui.button(
-            label="Edit",
-            style=discord.ButtonStyle.primary,
-            custom_id="post_signal_review_edit",
-            row=0,
-        )
-        async def edit(self, interaction: Any, button: Any) -> None:
-            resolved = await self.resolve(interaction)
-            if resolved is None:
-                await send_ephemeral_rejection(interaction, "This review is unavailable.")
-                return
-            review_id, record, message = resolved
-            await interaction.response.send_modal(
-                PostSignalReviewEditModal(review_id, str(message.id), record)
-            )
 
         @discord.ui.button(
             label="Review in 1 Month",
@@ -4177,9 +4213,14 @@ async def run_review_button_bot() -> None:
         if outcome != "claimed":
             return
         chart_path: Path | None = None
+        combined_path: Path | None = None
         discord_delivery_started = False
         try:
             original_chart_url = await resolve_original_signal_chart_url(record)
+            original_chart_bytes = await asyncio.to_thread(
+                download_manual_chart_bytes,
+                original_chart_url,
+            )
             chart_path = temporary_weekly_chart_path(record["symbol"])
             chart_path = await asyncio.to_thread(
                 generate_weekly_chart,
@@ -4191,9 +4232,18 @@ async def run_review_button_bot() -> None:
                 draft_channel = await client.fetch_channel(
                     signal_review_drafts_channel_id
                 )
-            comparison_filename = f"{record['symbol']}_review.png"
-            comparison_file = discord.File(
+            comparison_filename = f"{record['symbol']}_before_after.png"
+            combined_path = temporary_weekly_chart_path(
+                f"{record['symbol']}_before_after"
+            )
+            combined_path = await asyncio.to_thread(
+                combine_post_signal_review_charts,
+                original_chart_bytes,
                 chart_path,
+                output_path=combined_path,
+            )
+            comparison_file = discord.File(
+                combined_path,
                 filename=comparison_filename,
             )
             content_embed = discord.Embed.from_dict(
@@ -4202,19 +4252,10 @@ async def run_review_button_bot() -> None:
                     color=BRAND_NEON_PINK,
                 )
             )
-            original_embed = build_post_signal_chart_embed(
-                discord,
-                "Original Signal Chart",
-                original_chart_url,
-            )
-            comparison_embed = build_post_signal_chart_embed(
-                discord,
-                "Updated Weekly Chart — Staff Verification Required",
-                f"attachment://{comparison_filename}",
-            )
+            content_embed.set_image(url=f"attachment://{comparison_filename}")
             discord_delivery_started = True
             draft_message = await draft_channel.send(
-                embeds=[content_embed, original_embed, comparison_embed],
+                embed=content_embed,
                 file=comparison_file,
                 view=PostSignalReviewView(),
                 allowed_mentions=discord.AllowedMentions.none(),
@@ -4294,6 +4335,8 @@ async def run_review_button_bot() -> None:
         finally:
             if chart_path is not None:
                 cleanup_weekly_chart(chart_path)
+            if combined_path is not None:
+                cleanup_weekly_chart(combined_path)
 
     async def post_signal_review_scheduler() -> None:
         await client.wait_until_ready()

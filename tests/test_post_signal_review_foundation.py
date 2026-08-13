@@ -1,5 +1,7 @@
 import copy
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 with patch("dotenv.load_dotenv"):
@@ -137,6 +139,31 @@ class PostSignalReviewRecordTests(unittest.TestCase):
         self.assertIn("requires staff verification", message)
         self.assertIn("not a claim of realized profit", message)
 
+    def test_combined_review_chart_is_one_stacked_png(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("Pillow is unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original = root / "original.png"
+            updated = root / "updated.png"
+            output = root / "combined.png"
+            Image.new("RGB", (800, 400), "#112233").save(original)
+            Image.new("RGB", (400, 300), "#334455").save(updated)
+
+            result = earnings_reactions.combine_post_signal_review_charts(
+                original,
+                updated,
+                output_path=output,
+            )
+
+            self.assertEqual(result, output)
+            with Image.open(output) as combined:
+                self.assertEqual(combined.format, "PNG")
+                self.assertEqual(combined.width, 800)
+                self.assertGreater(combined.height, 1000)
+
 
 class PostSignalReviewLifecycleTests(unittest.TestCase):
     def setUp(self):
@@ -203,7 +230,7 @@ class PostSignalReviewLifecycleTests(unittest.TestCase):
             "draft-attempt",
         )
 
-    def test_publish_is_blocked_until_comparison_chart_is_verified(self):
+    def test_publish_requires_comparison_chart_verification(self):
         self.mark_draft_ready(verified=False)
         with self.patch_update():
             _state, outcome = earnings_reactions.claim_post_signal_review_action(
@@ -217,6 +244,22 @@ class PostSignalReviewLifecycleTests(unittest.TestCase):
         self.assertEqual(
             self.state["post_signal_reviews"]["900"]["review_status"],
             earnings_reactions.POST_SIGNAL_REVIEW_DRAFT_READY,
+        )
+
+    def test_verified_combined_chart_can_publish_without_edit_control(self):
+        self.mark_draft_ready(verified=True)
+        with self.patch_update():
+            _state, outcome = earnings_reactions.claim_post_signal_review_action(
+                "900",
+                "800",
+                "publish-attempt",
+                earnings_reactions.POST_SIGNAL_REVIEW_PUBLISHING,
+                "2026-09-11T09:35:00-04:00",
+            )
+        self.assertEqual(outcome, "claimed")
+        self.assertEqual(
+            self.state["post_signal_reviews"]["900"]["review_status"],
+            earnings_reactions.POST_SIGNAL_REVIEW_PUBLISHING,
         )
 
     def test_edit_can_verify_chart_and_set_outcome(self):
