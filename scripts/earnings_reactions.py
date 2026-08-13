@@ -168,11 +168,6 @@ POST_SIGNAL_REVIEW_SOURCES = {
     POST_SIGNAL_REVIEW_SOURCE_EARNINGS,
     POST_SIGNAL_REVIEW_SOURCE_MANUAL,
 }
-# Discord sizes image-only embeds more narrowly than text-rich embeds. A line of
-# visually blank braille characters makes each chart embed use the same maximum
-# card width as the review text; Discord then scales the attached chart to fill
-# that wider image area.
-POST_SIGNAL_CHART_WIDTH_SPACER = "\u2800" * 64
 MANUAL_SIGNAL_IMAGE_TYPES = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -2680,11 +2675,48 @@ def build_post_signal_chart_embed(
 ) -> Any:
     embed = discord_module.Embed(
         title=title,
-        description=POST_SIGNAL_CHART_WIDTH_SPACER,
         color=BRAND_NEON_PINK,
     )
     embed.set_image(url=image_url)
     return embed
+
+
+def build_post_signal_review_layout(
+    discord_module: Any,
+    content: str,
+    original_filename: str,
+    updated_filename: str,
+    *,
+    action_buttons: list[Any] | None = None,
+) -> Any:
+    """Build one Components V2 card with two full-width stacked charts."""
+    layout = discord_module.ui.LayoutView(timeout=None)
+    container = discord_module.ui.Container(accent_color=BRAND_NEON_PINK)
+    container.add_item(discord_module.ui.TextDisplay(content))
+    container.add_item(discord_module.ui.Separator())
+    container.add_item(discord_module.ui.TextDisplay("### Original Signal Chart"))
+    container.add_item(
+        discord_module.ui.MediaGallery(
+            discord_module.MediaGalleryItem(
+                f"attachment://{original_filename}",
+                description="Original Signal Chart",
+            )
+        )
+    )
+    container.add_item(discord_module.ui.Separator())
+    container.add_item(discord_module.ui.TextDisplay("### Updated Weekly Chart"))
+    container.add_item(
+        discord_module.ui.MediaGallery(
+            discord_module.MediaGalleryItem(
+                f"attachment://{updated_filename}",
+                description="Updated Weekly Chart",
+            )
+        )
+    )
+    if action_buttons:
+        container.add_item(discord_module.ui.ActionRow(*action_buttons))
+    layout.add_item(container)
+    return layout
 
 
 def store_post_signal_review(
@@ -3924,9 +3956,12 @@ async def run_review_button_bot() -> None:
         followup_sender = getattr(followup, "send", None)
 
         if callable(followup_sender):
-            await followup_sender(
-                message,
-                ephemeral=True,
+            await asyncio.wait_for(
+                followup_sender(
+                    message,
+                    ephemeral=True,
+                ),
+                timeout=5,
             )
 
     async def defer_ephemeral_response(
@@ -4104,9 +4139,62 @@ async def run_review_button_bot() -> None:
                         "Publishing remains blocked; please edit the review again.",
                     )
 
-    class PostSignalReviewView(discord.ui.View):
-        def __init__(self):
+    class PostSignalReviewView(discord.ui.LayoutView):
+        def __init__(
+            self,
+            content: str | None = None,
+            original_filename: str = "original.png",
+            updated_filename: str = "updated.png",
+        ):
             super().__init__(timeout=None)
+            publish_button = discord.ui.Button(
+                label="Publish Review",
+                style=discord.ButtonStyle.success,
+                custom_id="post_signal_review_publish",
+            )
+            async def publish_callback(interaction: Any) -> None:
+                await self.publish(interaction, publish_button)
+
+            publish_button.callback = publish_callback
+            defer_button = discord.ui.Button(
+                label="Review in 1 Month",
+                style=discord.ButtonStyle.secondary,
+                custom_id="post_signal_review_defer",
+            )
+            async def defer_callback(interaction: Any) -> None:
+                await self.defer_review(interaction, defer_button)
+
+            defer_button.callback = defer_callback
+            dismiss_button = discord.ui.Button(
+                label="Dismiss",
+                style=discord.ButtonStyle.danger,
+                custom_id="post_signal_review_dismiss",
+            )
+            async def dismiss_callback(interaction: Any) -> None:
+                await self.dismiss(interaction, dismiss_button)
+
+            dismiss_button.callback = dismiss_callback
+            if content is None:
+                self.add_item(
+                    discord.ui.Container(
+                        discord.ui.ActionRow(
+                            publish_button,
+                            defer_button,
+                            dismiss_button,
+                        ),
+                        accent_color=BRAND_NEON_PINK,
+                    )
+                )
+            else:
+                built = build_post_signal_review_layout(
+                    discord,
+                    content,
+                    original_filename,
+                    updated_filename,
+                    action_buttons=[publish_button, defer_button, dismiss_button],
+                )
+                for item in built.children:
+                    self.add_item(item)
 
         async def resolve(self, interaction: Any):
             if (
@@ -4130,12 +4218,6 @@ async def run_review_button_bot() -> None:
             )
             return (*found, message) if found is not None else None
 
-        @discord.ui.button(
-            label="Publish Review",
-            style=discord.ButtonStyle.success,
-            custom_id="post_signal_review_publish",
-            row=0,
-        )
         async def publish(self, interaction: Any, button: Any) -> None:
             message_id = str(getattr(getattr(interaction, "message", None), "id", ""))
             async with post_signal_review_locks.hold(message_id):
@@ -4206,29 +4288,19 @@ async def run_review_button_bot() -> None:
                         raise DefiniteDeliveryError(
                             "review chart retrieval timed out"
                         ) from exc
-                    content_embed = discord.Embed.from_dict(
-                        bordered_embed(
-                            build_post_signal_review_message(
-                                record,
-                                datetime.now(EASTERN),
-                                private=False,
-                            ),
-                            color=BRAND_NEON_PINK,
-                        )
-                    )
-                    original_embed = build_post_signal_chart_embed(
+                    public_layout = build_post_signal_review_layout(
                         discord,
-                        "Original Signal Chart",
-                        f"attachment://{original_filename}",
-                    )
-                    updated_embed = build_post_signal_chart_embed(
-                        discord,
-                        "Updated Weekly Chart",
-                        f"attachment://{updated_filename}",
+                        build_post_signal_review_message(
+                            record,
+                            datetime.now(EASTERN),
+                            private=False,
+                        ),
+                        original_filename,
+                        updated_filename,
                     )
                     public_message = await public_channel.send(
-                        embeds=[content_embed, original_embed, updated_embed],
                         files=[original_file, updated_file],
+                        view=public_layout,
                         allowed_mentions=discord.AllowedMentions.none(),
                     )
                 except (discord.Forbidden, DefiniteDeliveryError):
@@ -4285,12 +4357,6 @@ async def run_review_button_bot() -> None:
                         "The review was published; its private draft needs manual cleanup.",
                     )
 
-        @discord.ui.button(
-            label="Review in 1 Month",
-            style=discord.ButtonStyle.secondary,
-            custom_id="post_signal_review_defer",
-            row=0,
-        )
         async def defer_review(self, interaction: Any, button: Any) -> None:
             resolved = await self.resolve(interaction)
             if resolved is None:
@@ -4312,10 +4378,6 @@ async def run_review_button_bot() -> None:
             if outcome != "deferred":
                 await send_ephemeral_rejection(interaction, "The review was not rescheduled.")
                 return
-            await send_ephemeral_rejection(
-                interaction,
-                "Review rescheduled for one calendar month from today.",
-            )
             try:
                 await message.delete()
             except discord.NotFound:
@@ -4324,13 +4386,14 @@ async def run_review_button_bot() -> None:
                 await write_bot_log(
                     f"Signal Review {review_id} was deferred but its draft needs manual cleanup."
                 )
+            try:
+                await send_ephemeral_rejection(
+                    interaction,
+                    "Review rescheduled for one calendar month from today.",
+                )
+            except (asyncio.TimeoutError, discord.HTTPException):
+                pass
 
-        @discord.ui.button(
-            label="Dismiss",
-            style=discord.ButtonStyle.danger,
-            custom_id="post_signal_review_dismiss",
-            row=0,
-        )
         async def dismiss(self, interaction: Any, button: Any) -> None:
             resolved = await self.resolve(interaction)
             if resolved is None:
@@ -4355,7 +4418,6 @@ async def run_review_button_bot() -> None:
             if outcome != "claimed":
                 await send_ephemeral_rejection(interaction, "This review is unavailable.")
                 return
-            await send_ephemeral_rejection(interaction, "Review dismissed.")
             try:
                 await message.delete()
             except discord.NotFound:
@@ -4364,6 +4426,10 @@ async def run_review_button_bot() -> None:
                 await write_bot_log(
                     f"Signal Review {review_id} was dismissed but its draft needs manual cleanup."
                 )
+            try:
+                await send_ephemeral_rejection(interaction, "Review dismissed.")
+            except (asyncio.TimeoutError, discord.HTTPException):
+                pass
 
     async def resolve_original_signal_chart_url(record: dict[str, Any]) -> str:
         signal_channel = client.get_channel(int(record["signals_channel_id"]))
@@ -4449,27 +4515,15 @@ async def run_review_button_bot() -> None:
                 chart_path,
                 filename=updated_filename,
             )
-            content_embed = discord.Embed.from_dict(
-                bordered_embed(
-                    build_post_signal_review_message(record, now, private=True),
-                    color=BRAND_NEON_PINK,
-                )
-            )
-            original_embed = build_post_signal_chart_embed(
-                discord,
-                "Original Signal Chart",
-                f"attachment://{original_filename}",
-            )
-            updated_embed = build_post_signal_chart_embed(
-                discord,
-                "Updated Weekly Chart",
-                f"attachment://{updated_filename}",
+            review_view = PostSignalReviewView(
+                build_post_signal_review_message(record, now, private=True),
+                original_filename,
+                updated_filename,
             )
             discord_delivery_started = True
             draft_message = await draft_channel.send(
-                embeds=[content_embed, original_embed, updated_embed],
                 files=[original_file, updated_file],
-                view=PostSignalReviewView(),
+                view=review_view,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             draft_message_id = discord_id_text(getattr(draft_message, "id", None))
