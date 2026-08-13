@@ -204,45 +204,48 @@ class PostSignalReviewRecordTests(unittest.TestCase):
 
     def test_publish_acknowledgement_happens_before_claim_in_source(self):
         source = Path(earnings_reactions.__file__).read_text(encoding="utf-8")
-        publish = source[source.index("        async def publish("):source.index("        @discord.ui.button(\n            label=\"Review in 1 Month\"")]
+        publish = source[source.index("        async def publish("):source.index("        async def defer_review(")]
         self.assertLess(
             publish.index("await defer_ephemeral_response(interaction)"),
             publish.index("claim_post_signal_review_action("),
         )
         self.assertIn("await draft_message.delete()", publish)
 
-    def test_review_uses_two_full_width_chart_embeds_in_one_message(self):
+    def test_review_uses_one_container_with_two_full_width_media_galleries(self):
         source = Path(earnings_reactions.__file__).read_text(encoding="utf-8")
-        self.assertIn(
-            "embeds=[content_embed, original_embed, updated_embed]",
-            source,
-        )
         self.assertIn("files=[original_file, updated_file]", source)
-        self.assertIn('"Original Signal Chart"', source)
-        self.assertIn('"Updated Weekly Chart"', source)
+        self.assertNotIn("embeds=[content_embed, original_embed, updated_embed]", source)
 
-    def test_chart_embeds_expand_to_the_text_card_width(self):
-        class FakeEmbed:
-            def __init__(self, **kwargs):
-                self.kwargs = kwargs
-                self.image_url = None
+        import discord
 
-            def set_image(self, *, url):
-                self.image_url = url
-
-        fake_discord = type("FakeDiscord", (), {"Embed": FakeEmbed})
-        embed = earnings_reactions.build_post_signal_chart_embed(
-            fake_discord,
-            "Original Signal Chart",
-            "attachment://original.png",
+        layout = earnings_reactions.build_post_signal_review_layout(
+            discord,
+            "## Signal Review\nReview body",
+            "original.png",
+            "updated.png",
         )
+        payload = layout.to_components()
+        self.assertEqual(len(payload), 1)
+        self.assertEqual(payload[0]["type"], 17)
+        self.assertEqual(payload[0]["accent_color"], earnings_reactions.BRAND_NEON_PINK)
+        children = payload[0]["components"]
+        galleries = [child for child in children if child["type"] == 12]
+        self.assertEqual(len(galleries), 2)
+        self.assertEqual(galleries[0]["items"][0]["media"]["url"], "attachment://original.png")
+        self.assertEqual(galleries[1]["items"][0]["media"]["url"], "attachment://updated.png")
 
-        self.assertEqual(
-            embed.kwargs["description"],
-            earnings_reactions.POST_SIGNAL_CHART_WIDTH_SPACER,
+    def test_defer_and_dismiss_delete_before_optional_followup(self):
+        source = Path(earnings_reactions.__file__).read_text(encoding="utf-8")
+        deferred = source[source.index("        async def defer_review("):source.index("        async def dismiss(")]
+        dismissed = source[source.index("        async def dismiss("):source.index("    async def resolve_original_signal_chart_url")]
+        self.assertLess(
+            deferred.index("await message.delete()"),
+            deferred.index('"Review rescheduled for one calendar month from today."'),
         )
-        self.assertEqual(len(embed.kwargs["description"]), 64)
-        self.assertEqual(embed.image_url, "attachment://original.png")
+        self.assertLess(
+            dismissed.index("await message.delete()"),
+            dismissed.index('"Review dismissed."'),
+        )
 
 
 class PostSignalReviewLifecycleTests(unittest.TestCase):
