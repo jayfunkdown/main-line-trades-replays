@@ -3797,6 +3797,9 @@ async def run_review_button_bot() -> None:
                 return
             replacement_file = None
             replacement_filename = None
+            requested_chart_verification = (
+                str(self.chart_verified).strip().upper() == "YES"
+            )
             if uploads:
                 suffix = Path(uploads[0].filename).suffix.lower()
                 replacement_filename = f"{self.symbol}_review{suffix}"
@@ -3817,7 +3820,12 @@ async def run_review_button_bot() -> None:
                     datetime.now(EASTERN).isoformat(),
                     outcome=str(self.outcome),
                     summary=str(self.summary),
-                    comparison_chart_verified=str(self.chart_verified).strip().upper() == "YES",
+                    # A replacement chart is not publishable until Discord has
+                    # accepted that exact attachment below.
+                    comparison_chart_verified=(
+                        requested_chart_verification
+                        and replacement_file is None
+                    ),
                 )
             except EarningsStateError:
                 outcome = "invalid"
@@ -3845,6 +3853,7 @@ async def run_review_button_bot() -> None:
                     view=PostSignalReviewView(),
                 )
             else:
+                record["comparison_chart_verified"] = requested_chart_verification
                 original_embed = existing_embeds[1] if len(existing_embeds) > 1 else None
                 comparison_embed = build_post_signal_chart_embed(
                     discord,
@@ -3860,6 +3869,23 @@ async def run_review_button_bot() -> None:
                     attachments=[replacement_file],
                     view=PostSignalReviewView(),
                 )
+                try:
+                    _, persisted_outcome = edit_post_signal_review(
+                        self.review_id,
+                        self.draft_message_id,
+                        datetime.now(EASTERN).isoformat(),
+                        outcome=str(self.outcome),
+                        summary=str(self.summary),
+                        comparison_chart_verified=requested_chart_verification,
+                    )
+                except EarningsStateError:
+                    persisted_outcome = "invalid"
+                if persisted_outcome != "updated":
+                    await send_ephemeral_rejection(
+                        interaction,
+                        "The corrected chart was attached, but verification was not saved. "
+                        "Publishing remains blocked; please edit the review again.",
+                    )
 
     class PostSignalReviewView(discord.ui.View):
         def __init__(self):
