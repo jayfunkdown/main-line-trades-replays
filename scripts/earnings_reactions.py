@@ -4175,36 +4175,31 @@ async def run_review_button_bot() -> None:
                     if public_channel is None:
                         public_channel = await client.fetch_channel(signal_reviews_channel_id)
                     attachments = list(getattr(draft_message, "attachments", []) or [])
-                    combined_filename = f"{record['symbol']}_before_after.png"
-                    if len(attachments) == 1:
-                        try:
-                            combined_file = await asyncio.wait_for(
+                    if len(attachments) != 2:
+                        raise DefiniteDeliveryError("review charts unavailable")
+                    original_filename = f"{record['symbol']}_original.png"
+                    updated_filename = f"{record['symbol']}_updated.png"
+                    try:
+                        original_file, updated_file = await asyncio.gather(
+                            asyncio.wait_for(
                                 attachments[0].to_file(
-                                    filename=combined_filename,
+                                    filename=original_filename,
                                     use_cached=True,
                                 ),
                                 timeout=20,
-                            )
-                        except asyncio.TimeoutError as exc:
-                            raise DefiniteDeliveryError(
-                                "comparison chart retrieval timed out"
-                            ) from exc
-                    else:
-                        embed_images = [
-                            str(getattr(getattr(embed, "image", None), "url", "") or "")
-                            for embed in list(getattr(draft_message, "embeds", []) or [])
-                        ]
-                        image_url = next((url for url in embed_images if url), "")
-                        if not image_url:
-                            raise DefiniteDeliveryError("comparison chart unavailable")
-                        combined_bytes = await asyncio.to_thread(
-                            download_manual_chart_bytes,
-                            image_url,
+                            ),
+                            asyncio.wait_for(
+                                attachments[1].to_file(
+                                    filename=updated_filename,
+                                    use_cached=True,
+                                ),
+                                timeout=20,
+                            ),
                         )
-                        combined_file = discord.File(
-                            io.BytesIO(combined_bytes),
-                            filename=combined_filename,
-                        )
+                    except asyncio.TimeoutError as exc:
+                        raise DefiniteDeliveryError(
+                            "review chart retrieval timed out"
+                        ) from exc
                     content_embed = discord.Embed.from_dict(
                         bordered_embed(
                             build_post_signal_review_message(
@@ -4215,12 +4210,19 @@ async def run_review_button_bot() -> None:
                             color=BRAND_NEON_PINK,
                         )
                     )
-                    content_embed.set_image(
-                        url=f"attachment://{combined_filename}"
+                    original_embed = build_post_signal_chart_embed(
+                        discord,
+                        "Original Signal Chart",
+                        f"attachment://{original_filename}",
+                    )
+                    updated_embed = build_post_signal_chart_embed(
+                        discord,
+                        "Updated Weekly Chart",
+                        f"attachment://{updated_filename}",
                     )
                     public_message = await public_channel.send(
-                        embed=content_embed,
-                        file=combined_file,
+                        embeds=[content_embed, original_embed, updated_embed],
+                        files=[original_file, updated_file],
                         allowed_mentions=discord.AllowedMentions.none(),
                     )
                 except (discord.Forbidden, DefiniteDeliveryError):
@@ -4397,7 +4399,6 @@ async def run_review_button_bot() -> None:
         if outcome != "claimed":
             return
         chart_path: Path | None = None
-        combined_path: Path | None = None
         discord_delivery_started = False
         try:
             original_chart_url = await resolve_original_signal_chart_url(record)
@@ -4432,19 +4433,15 @@ async def run_review_button_bot() -> None:
                 draft_channel = await client.fetch_channel(
                     signal_review_drafts_channel_id
                 )
-            comparison_filename = f"{record['symbol']}_before_after.png"
-            combined_path = temporary_weekly_chart_path(
-                f"{record['symbol']}_before_after"
+            original_filename = f"{record['symbol']}_original.png"
+            updated_filename = f"{record['symbol']}_updated.png"
+            original_file = discord.File(
+                io.BytesIO(original_chart_bytes),
+                filename=original_filename,
             )
-            combined_path = await asyncio.to_thread(
-                combine_post_signal_review_charts,
-                original_chart_bytes,
+            updated_file = discord.File(
                 chart_path,
-                output_path=combined_path,
-            )
-            comparison_file = discord.File(
-                combined_path,
-                filename=comparison_filename,
+                filename=updated_filename,
             )
             content_embed = discord.Embed.from_dict(
                 bordered_embed(
@@ -4452,11 +4449,20 @@ async def run_review_button_bot() -> None:
                     color=BRAND_NEON_PINK,
                 )
             )
-            content_embed.set_image(url=f"attachment://{comparison_filename}")
+            original_embed = build_post_signal_chart_embed(
+                discord,
+                "Original Signal Chart",
+                f"attachment://{original_filename}",
+            )
+            updated_embed = build_post_signal_chart_embed(
+                discord,
+                "Updated Weekly Chart",
+                f"attachment://{updated_filename}",
+            )
             discord_delivery_started = True
             draft_message = await draft_channel.send(
-                embed=content_embed,
-                file=comparison_file,
+                embeds=[content_embed, original_embed, updated_embed],
+                files=[original_file, updated_file],
                 view=PostSignalReviewView(),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
@@ -4471,7 +4477,8 @@ async def run_review_button_bot() -> None:
                 updates={
                     "draft_channel_id": str(signal_review_drafts_channel_id),
                     "draft_message_id": draft_message_id,
-                    "comparison_chart_filename": comparison_filename,
+                    "original_review_chart_filename": original_filename,
+                    "updated_review_chart_filename": updated_filename,
                     "draft_created_at": datetime.now(EASTERN).isoformat(),
                     "current_price": current_price,
                 },
@@ -4536,8 +4543,6 @@ async def run_review_button_bot() -> None:
         finally:
             if chart_path is not None:
                 cleanup_weekly_chart(chart_path)
-            if combined_path is not None:
-                cleanup_weekly_chart(combined_path)
 
     async def post_signal_review_scheduler() -> None:
         await client.wait_until_ready()
