@@ -256,7 +256,7 @@ class PostSignalReviewRecordTests(unittest.TestCase):
         ]
         self.assertIn("method=\"DELETE\"", bounded)
         self.assertIn("urllib.request.urlopen(request, timeout=5)", bounded)
-        self.assertIn("asyncio.to_thread(delete_directly)", bounded)
+        self.assertNotIn("asyncio.to_thread", bounded)
         self.assertNotIn("getattr(message", bounded)
 
 

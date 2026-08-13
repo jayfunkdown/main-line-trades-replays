@@ -4001,26 +4001,20 @@ async def run_review_button_bot() -> None:
         if channel_id is None or message_id is None:
             return False
 
-        def delete_directly() -> bool:
-            request = urllib.request.Request(
-                f"https://discord.com/api/v10/channels/{channel_id}/messages/{message_id}",
-                method="DELETE",
-                headers={
-                    "Authorization": f"Bot {bot_token}",
-                    "User-Agent": "MainLineTrades/1.0",
-                },
-            )
-            try:
-                with urllib.request.urlopen(request, timeout=5) as response:
-                    return response.status in (200, 204)
-            except urllib.error.HTTPError as exc:
-                return exc.code == 404
-            except (OSError, TimeoutError):
-                return False
-
+        request = urllib.request.Request(
+            f"https://discord.com/api/v10/channels/{channel_id}/messages/{message_id}",
+            method="DELETE",
+            headers={
+                "Authorization": f"Bot {bot_token}",
+                "User-Agent": "MainLineTrades/1.0",
+            },
+        )
         try:
-            return await asyncio.wait_for(asyncio.to_thread(delete_directly), timeout=7)
-        except asyncio.TimeoutError:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return response.status in (200, 204)
+        except urllib.error.HTTPError as exc:
+            return exc.code == 404
+        except (OSError, TimeoutError):
             return False
 
     class PostSignalReviewEditModal(
