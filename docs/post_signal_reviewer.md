@@ -21,15 +21,20 @@ deployed. It does not backfill older Signals posts.
    Earnings Movers.
 6. The new chart preserves:
    - the original chart's visible time horizon;
-   - every original horizontal price level;
-   - the candle where each level begins;
+   - exactly one mandatory horizontal reference level;
+   - the candle/date where that single level begins;
    - all newly completed candles after the original signal.
-7. A private review card shows the original chart, updated chart, direction,
-   thesis, elapsed time, and an outcome summary.
-8. Staff chooses one of two actions:
+7. The review calculates performance from the single reference level to the
+   current price. Long performance follows the price change; Short performance
+   inverts it so a decline from the reference level is shown as a gain.
+8. A private review card shows the original chart, updated chart, direction,
+   reference level, current price, direction-adjusted gain/loss, thesis,
+   elapsed time, and an outcome summary.
+9. Staff chooses one of three actions:
    - **Publish**: send the approved card to the public signal-results channel.
    - **Pend One Month**: schedule the same signal for another calendar-month
      review without publishing a public result.
+   - **Dismiss**: close the review without publishing it.
 
 No review is published automatically in the first version.
 
@@ -43,6 +48,7 @@ Discord message ID. The record retains:
 - Signals channel and message IDs;
 - symbol or instrument;
 - mandatory Long/Short direction;
+- one mandatory chart reference level;
 - original trade thesis;
 - original chart filename;
 - sent timestamp;
@@ -67,11 +73,14 @@ bytes in runtime JSON.
   button interactions cannot produce duplicate results.
 - The bot must never infer Long or Short from chart appearance; it uses the
   mandatory direction saved with the original signal.
+- The bot must never choose among multiple chart lines. New signals permit one
+  official reference line only, and that saved price is the sole performance
+  baseline used by the reviewer.
 
 ## Later implementation phases
 
 1. Private and public Discord channel configuration.
 2. Due-review daily timer and private draft creation.
-3. Original-level extraction and updated weekly chart generation.
+3. Single-reference-level preservation and updated weekly chart generation.
 4. Staff Publish / Pend One Month controls.
 5. Public results feed and aggregate performance reporting.

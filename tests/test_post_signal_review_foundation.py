@@ -21,6 +21,7 @@ class PostSignalReviewRecordTests(unittest.TestCase):
             "trade_thesis": "Weekly resistance rejection.",
             "original_chart_filename": "charts/ROAD_weekly.png",
             "sent_at": "2026-08-11T09:30:00-04:00",
+            "reference_level": 120.0,
         }
         values.update(updates)
         return earnings_reactions.build_post_signal_review_record(**values)
@@ -35,6 +36,7 @@ class PostSignalReviewRecordTests(unittest.TestCase):
         self.assertEqual(record["signals_message_id"], "900")
         self.assertEqual(record["trade_direction"], "short")
         self.assertEqual(record["original_chart_filename"], "ROAD_weekly.png")
+        self.assertEqual(record["reference_level"], 120.0)
         self.assertEqual(record["review_status"], "scheduled")
         self.assertEqual(record["review_cycle"], 1)
         self.assertEqual(
@@ -127,6 +129,7 @@ class PostSignalReviewRecordTests(unittest.TestCase):
 
     def test_review_card_preserves_direction_thesis_and_verification_gate(self):
         record = self.build_record()
+        record["current_price"] = 108.0
         message = earnings_reactions.build_post_signal_review_message(
             record,
             earnings_reactions.datetime.fromisoformat(
@@ -137,8 +140,23 @@ class PostSignalReviewRecordTests(unittest.TestCase):
         self.assertIn("ROAD — Short", message)
         self.assertIn("Weekly resistance rejection.", message)
         self.assertIn("Still Active", message)
+        self.assertIn("Original level", message)
+        self.assertIn("Gain:** +10.00%", message)
         self.assertIn("requires staff verification", message)
         self.assertIn("not a claim of realized profit", message)
+
+    def test_performance_is_direction_adjusted_from_the_single_reference_level(self):
+        self.assertEqual(
+            earnings_reactions.direction_adjusted_performance(100, 90, "short"),
+            10.0,
+        )
+        self.assertEqual(
+            earnings_reactions.direction_adjusted_performance(100, 90, "long"),
+            -10.0,
+        )
+        self.assertIsNone(
+            earnings_reactions.direction_adjusted_performance(None, 90, "long")
+        )
 
     def test_combined_review_chart_is_one_stacked_png(self):
         try:

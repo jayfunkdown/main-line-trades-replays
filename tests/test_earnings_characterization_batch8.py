@@ -551,6 +551,7 @@ class ReviewModalBoundaryTests(unittest.IsolatedAsyncioTestCase):
 
         captured.modal.trade_direction._values = ["long"]
         captured.modal.trade_thesis._value = "Trade above resistance."
+        captured.modal.reference_level._value = "25.00"
         captured.modal.trade_chart._values = [attachment]
         return captured.modal, signals_channel, reviewer, guild
 
