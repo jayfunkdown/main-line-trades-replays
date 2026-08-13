@@ -209,7 +209,8 @@ class PostSignalReviewRecordTests(unittest.TestCase):
             publish.index("await defer_ephemeral_response(interaction)"),
             publish.index("claim_post_signal_review_action("),
         )
-        self.assertIn("await draft_message.delete()", publish)
+        self.assertIn("await delete_review_draft_bounded(", publish)
+        self.assertIn("interaction.channel_id", publish)
 
     def test_review_uses_one_container_with_two_full_width_media_galleries(self):
         source = Path(earnings_reactions.__file__).read_text(encoding="utf-8")
