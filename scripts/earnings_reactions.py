@@ -3984,6 +3984,38 @@ async def run_review_button_bot() -> None:
         except discord.InteractionResponded:
             pass
 
+    async def respond_ephemeral_now(interaction: Any, message: str) -> None:
+        """Complete a quick interaction without leaving Discord's spinner open."""
+        if interaction_response_is_done(interaction):
+            return
+        response = getattr(interaction, "response", None)
+        sender = getattr(response, "send_message", None)
+        if callable(sender):
+            await asyncio.wait_for(sender(message, ephemeral=True), timeout=5)
+
+    async def delete_review_draft_bounded(message: Any) -> bool:
+        """Delete a handled review draft without allowing Discord HTTP to hang."""
+        try:
+            await asyncio.wait_for(message.delete(), timeout=5)
+            return True
+        except discord.NotFound:
+            return True
+        except (asyncio.TimeoutError, discord.HTTPException):
+            channel_id = getattr(getattr(message, "channel", None), "id", None)
+            message_id = getattr(message, "id", None)
+            if channel_id is None or message_id is None:
+                return False
+            try:
+                await asyncio.wait_for(
+                    client.http.delete_message(channel_id, message_id),
+                    timeout=5,
+                )
+                return True
+            except discord.NotFound:
+                return True
+            except (asyncio.TimeoutError, discord.HTTPException):
+                return False
+
     class PostSignalReviewEditModal(
         discord.ui.Modal,
         title="Edit Signal Review",
@@ -4364,8 +4396,11 @@ async def run_review_button_bot() -> None:
                 return
             review_id, _record, message = resolved
             try:
-                await defer_ephemeral_response(interaction)
-            except Exception:
+                await respond_ephemeral_now(
+                    interaction,
+                    "Rescheduling this review for one calendar month from today.",
+                )
+            except (asyncio.TimeoutError, discord.HTTPException):
                 return
             try:
                 _state, outcome = defer_post_signal_review(
@@ -4378,21 +4413,10 @@ async def run_review_button_bot() -> None:
             if outcome != "deferred":
                 await send_ephemeral_rejection(interaction, "The review was not rescheduled.")
                 return
-            try:
-                await message.delete()
-            except discord.NotFound:
-                pass
-            except Exception:
+            if not await delete_review_draft_bounded(message):
                 await write_bot_log(
                     f"Signal Review {review_id} was deferred but its draft needs manual cleanup."
                 )
-            try:
-                await send_ephemeral_rejection(
-                    interaction,
-                    "Review rescheduled for one calendar month from today.",
-                )
-            except (asyncio.TimeoutError, discord.HTTPException):
-                pass
 
         async def dismiss(self, interaction: Any, button: Any) -> None:
             resolved = await self.resolve(interaction)
@@ -4401,8 +4425,8 @@ async def run_review_button_bot() -> None:
                 return
             review_id, _record, message = resolved
             try:
-                await defer_ephemeral_response(interaction)
-            except Exception:
+                await respond_ephemeral_now(interaction, "Dismissing this review.")
+            except (asyncio.TimeoutError, discord.HTTPException):
                 return
             attempt_id = uuid.uuid4().hex
             try:
@@ -4418,18 +4442,10 @@ async def run_review_button_bot() -> None:
             if outcome != "claimed":
                 await send_ephemeral_rejection(interaction, "This review is unavailable.")
                 return
-            try:
-                await message.delete()
-            except discord.NotFound:
-                pass
-            except Exception:
+            if not await delete_review_draft_bounded(message):
                 await write_bot_log(
                     f"Signal Review {review_id} was dismissed but its draft needs manual cleanup."
                 )
-            try:
-                await send_ephemeral_rejection(interaction, "Review dismissed.")
-            except (asyncio.TimeoutError, discord.HTTPException):
-                pass
 
     async def resolve_original_signal_chart_url(record: dict[str, Any]) -> str:
         signal_channel = client.get_channel(int(record["signals_channel_id"]))
