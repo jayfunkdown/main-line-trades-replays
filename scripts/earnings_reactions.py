@@ -3993,10 +3993,11 @@ async def run_review_button_bot() -> None:
         if callable(sender):
             await asyncio.wait_for(sender(message, ephemeral=True), timeout=5)
 
-    async def delete_review_draft_bounded(message: Any) -> bool:
+    async def delete_review_draft_bounded(
+        channel_id: int | str | None,
+        message_id: int | str | None,
+    ) -> bool:
         """Delete a handled review draft through Discord's bounded REST path."""
-        channel_id = getattr(getattr(message, "channel", None), "id", None)
-        message_id = getattr(message, "id", None)
         if channel_id is None or message_id is None:
             return False
 
@@ -4385,11 +4386,10 @@ async def run_review_button_bot() -> None:
                         "Discord accepted the review but confirmation failed. Do not retry.",
                     )
                     return
-                try:
-                    await draft_message.delete()
-                except discord.NotFound:
-                    pass
-                except Exception:
+                if not await delete_review_draft_bounded(
+                    interaction.channel_id,
+                    getattr(draft_message, "id", None),
+                ):
                     await send_ephemeral_rejection(
                         interaction,
                         "The review was published; its private draft needs manual cleanup.",
@@ -4419,7 +4419,10 @@ async def run_review_button_bot() -> None:
             if outcome != "deferred":
                 await send_ephemeral_rejection(interaction, "The review was not rescheduled.")
                 return
-            if not await delete_review_draft_bounded(message):
+            if not await delete_review_draft_bounded(
+                interaction.channel_id,
+                getattr(message, "id", None),
+            ):
                 await write_bot_log(
                     f"Signal Review {review_id} was deferred but its draft needs manual cleanup."
                 )
@@ -4448,7 +4451,10 @@ async def run_review_button_bot() -> None:
             if outcome != "claimed":
                 await send_ephemeral_rejection(interaction, "This review is unavailable.")
                 return
-            if not await delete_review_draft_bounded(message):
+            if not await delete_review_draft_bounded(
+                interaction.channel_id,
+                getattr(message, "id", None),
+            ):
                 await write_bot_log(
                     f"Signal Review {review_id} was dismissed but its draft needs manual cleanup."
                 )
