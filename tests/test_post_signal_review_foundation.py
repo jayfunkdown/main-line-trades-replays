@@ -180,8 +180,8 @@ class PostSignalReviewRecordTests(unittest.TestCase):
             self.assertEqual(result, output)
             with Image.open(output) as combined:
                 self.assertEqual(combined.format, "PNG")
-                self.assertEqual(combined.width, 800)
-                self.assertGreater(combined.height, 1000)
+                self.assertEqual(combined.width, 1600)
+                self.assertLess(combined.height, combined.width)
 
     def test_weekly_aggregation_supports_matching_long_history(self):
         daily = []
