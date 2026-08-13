@@ -494,6 +494,7 @@ class SendToSignalsCharacterizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(modal)
         modal.trade_direction._values = ["long"]
         modal.trade_thesis._value = "Trade above resistance."
+        modal.reference_level._value = "25.00"
         modal.trade_chart._values = [
             SimpleNamespace(
                 filename="chart.png",
