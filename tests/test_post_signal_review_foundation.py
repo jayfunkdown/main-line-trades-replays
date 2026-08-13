@@ -234,18 +234,25 @@ class PostSignalReviewRecordTests(unittest.TestCase):
         self.assertEqual(galleries[0]["items"][0]["media"]["url"], "attachment://original.png")
         self.assertEqual(galleries[1]["items"][0]["media"]["url"], "attachment://updated.png")
 
-    def test_defer_and_dismiss_delete_before_optional_followup(self):
+    def test_defer_and_dismiss_complete_response_then_use_bounded_delete(self):
         source = Path(earnings_reactions.__file__).read_text(encoding="utf-8")
         deferred = source[source.index("        async def defer_review("):source.index("        async def dismiss(")]
         dismissed = source[source.index("        async def dismiss("):source.index("    async def resolve_original_signal_chart_url")]
-        self.assertLess(
-            deferred.index("await message.delete()"),
-            deferred.index('"Review rescheduled for one calendar month from today."'),
-        )
-        self.assertLess(
-            dismissed.index("await message.delete()"),
-            dismissed.index('"Review dismissed."'),
-        )
+        self.assertIn("await respond_ephemeral_now(", deferred)
+        self.assertIn("await delete_review_draft_bounded(message)", deferred)
+        self.assertNotIn("await defer_ephemeral_response(interaction)", deferred)
+        self.assertIn("await respond_ephemeral_now(", dismissed)
+        self.assertIn("await delete_review_draft_bounded(message)", dismissed)
+        self.assertNotIn("await defer_ephemeral_response(interaction)", dismissed)
+
+    def test_review_draft_delete_has_primary_and_fallback_timeouts(self):
+        source = Path(earnings_reactions.__file__).read_text(encoding="utf-8")
+        bounded = source[
+            source.index("    async def delete_review_draft_bounded("):
+            source.index("    class PostSignalReviewEditModal")
+        ]
+        self.assertIn("await asyncio.wait_for(message.delete(), timeout=5)", bounded)
+        self.assertIn("client.http.delete_message(channel_id, message_id)", bounded)
 
 
 class PostSignalReviewLifecycleTests(unittest.TestCase):
