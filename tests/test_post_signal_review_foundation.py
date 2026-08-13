@@ -245,14 +245,16 @@ class PostSignalReviewRecordTests(unittest.TestCase):
         self.assertIn("await delete_review_draft_bounded(message)", dismissed)
         self.assertNotIn("await defer_ephemeral_response(interaction)", dismissed)
 
-    def test_review_draft_delete_has_primary_and_fallback_timeouts(self):
+    def test_review_draft_delete_uses_bounded_direct_discord_request(self):
         source = Path(earnings_reactions.__file__).read_text(encoding="utf-8")
         bounded = source[
             source.index("    async def delete_review_draft_bounded("):
             source.index("    class PostSignalReviewEditModal")
         ]
-        self.assertIn("await asyncio.wait_for(message.delete(), timeout=5)", bounded)
-        self.assertIn("client.http.delete_message(channel_id, message_id)", bounded)
+        self.assertIn("method=\"DELETE\"", bounded)
+        self.assertIn("urllib.request.urlopen(request, timeout=5)", bounded)
+        self.assertIn("asyncio.to_thread(delete_directly)", bounded)
+        self.assertNotIn("message.delete()", bounded)
 
 
 class PostSignalReviewLifecycleTests(unittest.TestCase):

@@ -3994,27 +3994,33 @@ async def run_review_button_bot() -> None:
             await asyncio.wait_for(sender(message, ephemeral=True), timeout=5)
 
     async def delete_review_draft_bounded(message: Any) -> bool:
-        """Delete a handled review draft without allowing Discord HTTP to hang."""
-        try:
-            await asyncio.wait_for(message.delete(), timeout=5)
-            return True
-        except discord.NotFound:
-            return True
-        except (asyncio.TimeoutError, discord.HTTPException):
-            channel_id = getattr(getattr(message, "channel", None), "id", None)
-            message_id = getattr(message, "id", None)
-            if channel_id is None or message_id is None:
-                return False
+        """Delete a handled review draft through Discord's bounded REST path."""
+        channel_id = getattr(getattr(message, "channel", None), "id", None)
+        message_id = getattr(message, "id", None)
+        if channel_id is None or message_id is None:
+            return False
+
+        def delete_directly() -> bool:
+            request = urllib.request.Request(
+                f"https://discord.com/api/v10/channels/{channel_id}/messages/{message_id}",
+                method="DELETE",
+                headers={
+                    "Authorization": f"Bot {bot_token}",
+                    "User-Agent": "MainLineTrades/1.0",
+                },
+            )
             try:
-                await asyncio.wait_for(
-                    client.http.delete_message(channel_id, message_id),
-                    timeout=5,
-                )
-                return True
-            except discord.NotFound:
-                return True
-            except (asyncio.TimeoutError, discord.HTTPException):
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    return response.status in (200, 204)
+            except urllib.error.HTTPError as exc:
+                return exc.code == 404
+            except (OSError, TimeoutError):
                 return False
+
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(delete_directly), timeout=7)
+        except asyncio.TimeoutError:
+            return False
 
     class PostSignalReviewEditModal(
         discord.ui.Modal,
