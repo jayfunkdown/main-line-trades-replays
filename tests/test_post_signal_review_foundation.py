@@ -1,4 +1,5 @@
 import copy
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
@@ -163,6 +164,34 @@ class PostSignalReviewRecordTests(unittest.TestCase):
                 self.assertEqual(combined.format, "PNG")
                 self.assertEqual(combined.width, 800)
                 self.assertGreater(combined.height, 1000)
+
+    def test_weekly_aggregation_supports_matching_long_history(self):
+        daily = []
+        start = earnings_reactions.datetime(2024, 1, 1, tzinfo=earnings_reactions.timezone.utc)
+        for week in range(140):
+            daily.append(
+                {
+                    "timestamp": (start + earnings_reactions.timedelta(days=week * 7)).timestamp(),
+                    "open": 1.0,
+                    "high": 1.1,
+                    "low": 0.9,
+                    "close": 1.0,
+                    "volume": 100.0,
+                }
+            )
+        self.assertEqual(
+            len(earnings_reactions.aggregate_weekly_candles(daily, max_weeks=130)),
+            130,
+        )
+
+    def test_publish_acknowledgement_happens_before_claim_in_source(self):
+        source = Path(earnings_reactions.__file__).read_text(encoding="utf-8")
+        publish = source[source.index("        async def publish("):source.index("        @discord.ui.button(\n            label=\"Review in 1 Month\"")]
+        self.assertLess(
+            publish.index("await defer_ephemeral_response(interaction)"),
+            publish.index("claim_post_signal_review_action("),
+        )
+        self.assertIn("await draft_message.delete()", publish)
 
 
 class PostSignalReviewLifecycleTests(unittest.TestCase):
