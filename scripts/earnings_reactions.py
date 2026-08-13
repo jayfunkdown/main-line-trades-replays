@@ -1478,7 +1478,7 @@ def combine_post_signal_review_charts(
     *,
     output_path: Path,
 ) -> Path:
-    """Build the single, vertically stacked Before/After review image."""
+    """Build one wide Before/After image that Discord renders card-width."""
     try:
         from PIL import Image, ImageDraw, ImageFont
     except ImportError as exc:
@@ -1491,32 +1491,44 @@ def combine_post_signal_review_charts(
 
     original = open_image(original_chart)
     updated = open_image(updated_chart)
-    width = max(original.width, updated.width)
+    panel_width = max(original.width, updated.width)
 
     def fit_width(image: Any) -> Any:
-        if image.width == width:
+        if image.width == panel_width:
             return image
-        height = max(1, round(image.height * width / image.width))
-        return image.resize((width, height), Image.Resampling.LANCZOS)
+        height = max(1, round(image.height * panel_width / image.width))
+        return image.resize((panel_width, height), Image.Resampling.LANCZOS)
 
     original = fit_width(original)
     updated = fit_width(updated)
-    band_height = max(72, round(width * 0.045))
+    panel_height = max(original.height, updated.height)
+
+    def fit_panel_height(image: Any) -> Any:
+        if image.height == panel_height:
+            return image
+        panel = Image.new("RGB", (panel_width, panel_height), "#05070B")
+        panel.paste(image, (0, (panel_height - image.height) // 2))
+        return panel
+
+    original = fit_panel_height(original)
+    updated = fit_panel_height(updated)
+    width = panel_width * 2
+    band_height = max(72, round(panel_width * 0.045))
     canvas = Image.new(
         "RGB",
-        (width, band_height * 2 + original.height + updated.height),
+        (width, band_height + panel_height),
         "#05070B",
     )
     draw = ImageDraw.Draw(canvas)
     try:
-        font = ImageFont.truetype("arialbd.ttf", max(24, round(width * 0.022)))
+        font = ImageFont.truetype("arialbd.ttf", max(24, round(panel_width * 0.022)))
     except OSError:
         font = ImageFont.load_default()
 
-    def title_band(y: int, title: str) -> None:
-        draw.rectangle((0, y, width, y + band_height), fill="#0D1119")
+    def title_band(x: int, title: str) -> None:
+        draw.rectangle((x, 0, x + panel_width, band_height), fill="#0D1119")
         draw.line(
-            (0, y + band_height - 3, width, y + band_height - 3),
+            (x, band_height - 3, x + panel_width, band_height - 3),
             fill="#FF2BD6",
             width=3,
         )
@@ -1524,18 +1536,17 @@ def combine_post_signal_review_charts(
         text_width = box[2] - box[0]
         text_height = box[3] - box[1]
         draw.text(
-            ((width - text_width) / 2, y + (band_height - text_height) / 2 - box[1]),
+            (x + (panel_width - text_width) / 2, (band_height - text_height) / 2 - box[1]),
             title,
             fill="#F4F7FF",
             font=font,
         )
 
     title_band(0, "BEFORE — ORIGINAL SIGNAL CHART")
-    original_y = band_height
-    canvas.paste(original, (0, original_y))
-    updated_title_y = original_y + original.height
-    title_band(updated_title_y, "AFTER — UPDATED WEEKLY CHART")
-    canvas.paste(updated, (0, updated_title_y + band_height))
+    title_band(panel_width, "AFTER — UPDATED WEEKLY CHART")
+    canvas.paste(original, (0, band_height))
+    canvas.paste(updated, (panel_width, band_height))
+    draw.line((panel_width, 0, panel_width, canvas.height), fill="#FF2BD6", width=3)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     canvas.save(output_path, format="PNG", optimize=True)
     return output_path
@@ -4166,9 +4177,18 @@ async def run_review_button_bot() -> None:
                     attachments = list(getattr(draft_message, "attachments", []) or [])
                     combined_filename = f"{record['symbol']}_before_after.png"
                     if len(attachments) == 1:
-                        combined_file = await attachments[0].to_file(
-                            filename=combined_filename
-                        )
+                        try:
+                            combined_file = await asyncio.wait_for(
+                                attachments[0].to_file(
+                                    filename=combined_filename,
+                                    use_cached=True,
+                                ),
+                                timeout=20,
+                            )
+                        except asyncio.TimeoutError as exc:
+                            raise DefiniteDeliveryError(
+                                "comparison chart retrieval timed out"
+                            ) from exc
                     else:
                         embed_images = [
                             str(getattr(getattr(embed, "image", None), "url", "") or "")
