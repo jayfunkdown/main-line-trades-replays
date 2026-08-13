@@ -209,7 +209,7 @@ class PostSignalReviewRecordTests(unittest.TestCase):
             publish.index("await defer_ephemeral_response(interaction)"),
             publish.index("claim_post_signal_review_action("),
         )
-        self.assertIn("await delete_review_draft_bounded(", publish)
+        self.assertIn("schedule_review_draft_cleanup(", publish)
         self.assertIn("interaction.channel_id", publish)
 
     def test_review_uses_one_container_with_two_full_width_media_galleries(self):
@@ -240,24 +240,25 @@ class PostSignalReviewRecordTests(unittest.TestCase):
         deferred = source[source.index("        async def defer_review("):source.index("        async def dismiss(")]
         dismissed = source[source.index("        async def dismiss("):source.index("    async def resolve_original_signal_chart_url")]
         self.assertIn("await respond_ephemeral_now(", deferred)
-        self.assertIn("await delete_review_draft_bounded(", deferred)
+        self.assertIn("schedule_review_draft_cleanup(", deferred)
         self.assertIn("interaction.channel_id", deferred)
         self.assertNotIn("await defer_ephemeral_response(interaction)", deferred)
         self.assertIn("await respond_ephemeral_now(", dismissed)
-        self.assertIn("await delete_review_draft_bounded(", dismissed)
+        self.assertIn("schedule_review_draft_cleanup(", dismissed)
         self.assertIn("interaction.channel_id", dismissed)
         self.assertNotIn("await defer_ephemeral_response(interaction)", dismissed)
 
-    def test_review_draft_delete_uses_bounded_direct_discord_request(self):
+    def test_review_draft_delete_runs_after_callback_with_rate_limit_handling(self):
         source = Path(earnings_reactions.__file__).read_text(encoding="utf-8")
-        bounded = source[
-            source.index("    async def delete_review_draft_bounded("):
+        cleanup = source[
+            source.index("    def schedule_review_draft_cleanup("):
             source.index("    class PostSignalReviewEditModal")
         ]
-        self.assertIn("method=\"DELETE\"", bounded)
-        self.assertIn("urllib.request.urlopen(request, timeout=5)", bounded)
-        self.assertNotIn("asyncio.to_thread", bounded)
-        self.assertNotIn("getattr(message", bounded)
+        self.assertIn("await asyncio.sleep(1)", cleanup)
+        self.assertIn("await client.http.delete_message", cleanup)
+        self.assertIn("asyncio.create_task(cleanup())", cleanup)
+        self.assertIn("review_cleanup_tasks.add(task)", cleanup)
+        self.assertNotIn("asyncio.wait_for", cleanup)
 
 
 class PostSignalReviewLifecycleTests(unittest.TestCase):

@@ -3819,6 +3819,7 @@ async def run_review_button_bot() -> None:
     command_tree = discord.app_commands.CommandTree(client)
     command_sync_attempted = False
     post_signal_review_task_started = False
+    review_cleanup_tasks: set[asyncio.Task[Any]] = set()
 
     async def get_bot_log_channel():
         """
@@ -3993,29 +3994,37 @@ async def run_review_button_bot() -> None:
         if callable(sender):
             await asyncio.wait_for(sender(message, ephemeral=True), timeout=5)
 
-    async def delete_review_draft_bounded(
+    def schedule_review_draft_cleanup(
         channel_id: int | str | None,
         message_id: int | str | None,
-    ) -> bool:
-        """Delete a handled review draft through Discord's bounded REST path."""
+        review_id: str,
+        outcome: str,
+    ) -> None:
+        """Delete a handled draft after the interaction callback has completed."""
         if channel_id is None or message_id is None:
-            return False
+            return
 
-        request = urllib.request.Request(
-            f"https://discord.com/api/v10/channels/{channel_id}/messages/{message_id}",
-            method="DELETE",
-            headers={
-                "Authorization": f"Bot {bot_token}",
-                "User-Agent": "MainLineTrades/1.0",
-            },
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=5) as response:
-                return response.status in (200, 204)
-        except urllib.error.HTTPError as exc:
-            return exc.code == 404
-        except (OSError, TimeoutError):
-            return False
+        async def cleanup() -> None:
+            try:
+                # Let Discord finish the component interaction before using
+                # the message-delete route. discord.py then owns any 429 wait.
+                await asyncio.sleep(1)
+                await client.http.delete_message(int(channel_id), int(message_id))
+            except discord.NotFound:
+                return
+            except Exception as exc:
+                print(
+                    f"Signal Review {review_id} {outcome} cleanup failed: {exc!r}",
+                    flush=True,
+                )
+                await write_bot_log(
+                    f"Signal Review {review_id} was {outcome} but its draft "
+                    "needs manual cleanup."
+                )
+
+        task = asyncio.create_task(cleanup())
+        review_cleanup_tasks.add(task)
+        task.add_done_callback(review_cleanup_tasks.discard)
 
     class PostSignalReviewEditModal(
         discord.ui.Modal,
@@ -4380,14 +4389,12 @@ async def run_review_button_bot() -> None:
                         "Discord accepted the review but confirmation failed. Do not retry.",
                     )
                     return
-                if not await delete_review_draft_bounded(
+                schedule_review_draft_cleanup(
                     interaction.channel_id,
                     getattr(draft_message, "id", None),
-                ):
-                    await send_ephemeral_rejection(
-                        interaction,
-                        "The review was published; its private draft needs manual cleanup.",
-                    )
+                    review_id,
+                    "published",
+                )
 
         async def defer_review(self, interaction: Any, button: Any) -> None:
             resolved = await self.resolve(interaction)
@@ -4413,13 +4420,12 @@ async def run_review_button_bot() -> None:
             if outcome != "deferred":
                 await send_ephemeral_rejection(interaction, "The review was not rescheduled.")
                 return
-            if not await delete_review_draft_bounded(
+            schedule_review_draft_cleanup(
                 interaction.channel_id,
                 getattr(message, "id", None),
-            ):
-                await write_bot_log(
-                    f"Signal Review {review_id} was deferred but its draft needs manual cleanup."
-                )
+                review_id,
+                "deferred",
+            )
 
         async def dismiss(self, interaction: Any, button: Any) -> None:
             resolved = await self.resolve(interaction)
@@ -4445,13 +4451,12 @@ async def run_review_button_bot() -> None:
             if outcome != "claimed":
                 await send_ephemeral_rejection(interaction, "This review is unavailable.")
                 return
-            if not await delete_review_draft_bounded(
+            schedule_review_draft_cleanup(
                 interaction.channel_id,
                 getattr(message, "id", None),
-            ):
-                await write_bot_log(
-                    f"Signal Review {review_id} was dismissed but its draft needs manual cleanup."
-                )
+                review_id,
+                "dismissed",
+            )
 
     async def resolve_original_signal_chart_url(record: dict[str, Any]) -> str:
         signal_channel = client.get_channel(int(record["signals_channel_id"]))
