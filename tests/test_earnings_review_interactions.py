@@ -274,6 +274,7 @@ class EarningsReviewInteractionAuthorizationTests(
             to_file=AsyncMock(return_value="synthetic-discord-file"),
         )
         modal.trade_direction._values = ["long"]
+        modal.reference_level._value = "25.00"
         modal.trade_thesis._value = "Trade above resistance."
         modal.trade_chart._values = [attachment]
         return modal, attachment
@@ -356,6 +357,7 @@ class EarningsReviewInteractionAuthorizationTests(
                             state["signal_queue"]["token"]["candidate"],
                             "Trade above resistance.",
                             "long",
+                            25.0,
                         ),
                         "color": 0xFF2BD6,
                         "image": {
@@ -451,6 +453,7 @@ class EarningsReviewInteractionAuthorizationTests(
                     "200",
                     "attempt-one",
                     "2026-08-06T10:00:00-04:00",
+                    reference_level=25.0,
                 )
             )
             sent_state, sent_outcome = (
@@ -488,6 +491,7 @@ class EarningsReviewInteractionAuthorizationTests(
                 "200",
                 "old-attempt",
                 "2026-08-06T10:00:00-04:00",
+                reference_level=25.0,
             )
             earnings_reactions.transition_signal_delivery(
                 "token",
@@ -502,6 +506,7 @@ class EarningsReviewInteractionAuthorizationTests(
                 "200",
                 "new-attempt",
                 "2026-08-06T10:02:00-04:00",
+                reference_level=25.0,
             )
             final_state, outcome = (
                 earnings_reactions.transition_signal_delivery(
@@ -690,6 +695,7 @@ class EarningsReviewInteractionAuthorizationTests(
         for modal in (modal_one, modal_two):
             self.assertIsNotNone(modal)
             modal.trade_direction._values = ["long"]
+            modal.reference_level._value = "25.00"
             modal.trade_thesis._value = "Trade above resistance."
             modal.trade_chart._values = [barrier]
 

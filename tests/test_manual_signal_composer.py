@@ -471,6 +471,7 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
         modal.instrument._value = "EUR/USD"
         modal.trade_thesis._value = "Hold the breakout."
         modal.timeframe._value = "4h"
+        modal.reference_level._value = "1.2345"
         modal.trade_direction._values = ["long"]
         modal.trade_chart._values = [self.attachment()]
         submit = self.interaction(client)
@@ -489,6 +490,7 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
                     trade_direction="long",
                     timeframe="4h",
                     setup_name="",
+                    reference_level=1.2345,
                 ),
                 "color": 0xFF2BD6,
                 "image": {"url": "attachment://chart.png"},
@@ -500,6 +502,7 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record["draft_message_id"], "400")
         self.assertEqual(record["delivery_status"], "ready")
         self.assertEqual(record["trade_direction"], "long")
+        self.assertEqual(record["reference_level"], 1.2345)
 
     async def test_new_signal_form_requires_direction_before_draft_creation(self):
         client, tree, _view = await self.start_bot()
@@ -518,6 +521,7 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
         modal.instrument._value = "EUR/USD"
         modal.trade_thesis._value = "Hold the breakout."
         modal.timeframe._value = "4h"
+        modal.reference_level._value = "1.2345"
         modal.trade_chart._values = [self.attachment()]
         submit = self.interaction(client)
         await modal.on_submit(submit)
@@ -585,6 +589,7 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(modal.trade_direction.options[1].default)
         modal.trade_thesis._value = "Edited thesis"
         modal.trade_direction._values = ["short"]
+        modal.reference_level._value = "1.2345"
         modal.trade_chart._values = []
         submit = self.interaction(client, message=message)
         with patch.object(
@@ -606,6 +611,10 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.state["manual_signal_drafts"]["draft"]["trade_direction"],
             "short",
+        )
+        self.assertEqual(
+            self.state["manual_signal_drafts"]["draft"]["reference_level"],
+            1.2345,
         )
         self.assertEqual(
             self.state["manual_signal_drafts"]["draft"]["setup_name"],
