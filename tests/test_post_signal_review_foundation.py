@@ -211,6 +211,16 @@ class PostSignalReviewRecordTests(unittest.TestCase):
         )
         self.assertIn("await draft_message.delete()", publish)
 
+    def test_review_uses_two_full_width_chart_embeds_in_one_message(self):
+        source = Path(earnings_reactions.__file__).read_text(encoding="utf-8")
+        self.assertIn(
+            "embeds=[content_embed, original_embed, updated_embed]",
+            source,
+        )
+        self.assertIn("files=[original_file, updated_file]", source)
+        self.assertIn('"Original Signal Chart"', source)
+        self.assertIn('"Updated Weekly Chart"', source)
+
 
 class PostSignalReviewLifecycleTests(unittest.TestCase):
     def setUp(self):
