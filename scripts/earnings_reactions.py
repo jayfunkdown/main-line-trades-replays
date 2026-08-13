@@ -1091,7 +1091,7 @@ def yahoo_chart_url(
 
     query = urllib.parse.urlencode(
         {
-            "range": "2y",
+            "range": "5y",
             "interval": "1d",
             "includeAdjustedClose": "true",
             "events": "div,splits",
@@ -1213,6 +1213,8 @@ def aggregate_weekly_candles(
     daily_candles: list[
         dict[str, float]
     ],
+    *,
+    max_weeks: int = WEEKLY_CHART_WEEKS,
 ) -> list[dict[str, Any]]:
     weeks: dict[
         tuple[int, int],
@@ -1269,15 +1271,15 @@ def aggregate_weekly_candles(
             }
         )
 
-    return weekly[
-        -WEEKLY_CHART_WEEKS:
-    ]
+    return weekly[-max_weeks:]
 
 
 def generate_weekly_chart(
     symbol: str,
     *,
     output_path: Path | None = None,
+    weeks: int = WEEKLY_CHART_WEEKS,
+    level_segments: list[dict[str, Any]] | None = None,
 ) -> Path:
     """
     Generate the earnings weekly candlestick chart.
@@ -1295,7 +1297,9 @@ def generate_weekly_chart(
         ) from exc
 
     daily = fetch_daily_candles(symbol)
-    weekly = aggregate_weekly_candles(daily)
+    weekly = aggregate_weekly_candles(daily, max_weeks=weeks)
+    if weeks < 4:
+        raise ValueError("Weekly chart history must include at least four weeks.")
 
     if len(weekly) < 4:
         raise RuntimeError(
@@ -1361,6 +1365,40 @@ def generate_weekly_chart(
                 linewidth=1.0,
                 zorder=3,
             )
+        )
+
+    for segment in level_segments or []:
+        price = segment.get("price")
+        start_date = parse_iso_datetime(segment.get("start_date"))
+        if isinstance(price, bool) or not isinstance(price, Real) or start_date is None:
+            raise ValueError("Chart levels require numeric prices and ISO start dates.")
+        start_index = next(
+            (
+                index
+                for index, candle in enumerate(weekly)
+                if candle["date"].date() >= start_date.date()
+            ),
+            len(weekly) - 1,
+        )
+        ax.hlines(
+            float(price),
+            start_index,
+            len(weekly) - 0.35,
+            color="#FF9800",
+            linewidth=1.8,
+            zorder=4,
+        )
+        ax.annotate(
+            f"{float(price):.4f}",
+            xy=(len(weekly) - 0.35, float(price)),
+            xytext=(5, 0),
+            textcoords="offset points",
+            va="center",
+            color="#05070B",
+            fontsize=8,
+            fontweight="bold",
+            bbox={"boxstyle": "round,pad=0.16", "fc": "#FF9800", "ec": "#FF9800"},
+            zorder=5,
         )
 
     label_indexes = list(
@@ -3996,6 +4034,17 @@ async def run_review_button_bot() -> None:
                     await send_ephemeral_rejection(interaction, "This review is unavailable.")
                     return
                 review_id, record, draft_message = resolved
+                # Acknowledge Discord before any transactional state change.
+                # If acknowledgement itself fails, the review remains safely
+                # draft_ready and another action can still be chosen.
+                try:
+                    await defer_ephemeral_response(interaction)
+                except Exception:
+                    await write_bot_log(
+                        f"Signal Review {review_id} could not acknowledge Publish; "
+                        "no publication was claimed."
+                    )
+                    return
                 attempt_id = uuid.uuid4().hex
                 now = datetime.now(EASTERN).isoformat()
                 try:
@@ -4017,7 +4066,6 @@ async def run_review_button_bot() -> None:
                 if outcome != "claimed":
                     await send_ephemeral_rejection(interaction, "This review is already being handled.")
                     return
-                await defer_ephemeral_response(interaction)
                 try:
                     public_channel = client.get_channel(signal_reviews_channel_id)
                     if public_channel is None:
