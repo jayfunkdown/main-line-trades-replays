@@ -1283,42 +1283,17 @@ def aggregate_weekly_candles(
     return weekly[-max_weeks:]
 
 
-def weekly_candles_for_signal_review(
-    weekly: list[dict[str, Any]],
-    signal_start: datetime,
-    *,
-    lookback_weeks: int = 12,
-) -> list[dict[str, Any]]:
-    """Keep the signal week, a short lookback, and every completed week after."""
-    if signal_start.tzinfo is None:
-        raise ValueError("Signal review chart dates must be timezone-aware.")
-
-    signal_date = signal_start.date()
-    start_index = next(
-        (
-            index
-            for index, candle in enumerate(weekly)
-            if candle["date"].date() >= signal_date
-        ),
-        len(weekly) - 1,
-    )
-    first_index = max(0, start_index - lookback_weeks)
-    return weekly[first_index:]
-
-
 def weekly_chart_price_limits(
     weekly: list[dict[str, Any]],
     *,
     reference_levels: list[float] | None = None,
-    focus_from_index: int = 0,
     padding_ratio: float = 0.12,
 ) -> tuple[float, float]:
     if not weekly:
         raise ValueError("Weekly chart price limits require at least one candle.")
 
-    focus = weekly[max(0, focus_from_index):] or weekly
-    lows = [float(candle["low"]) for candle in focus]
-    highs = [float(candle["high"]) for candle in focus]
+    lows = [float(candle["low"]) for candle in weekly]
+    highs = [float(candle["high"]) for candle in weekly]
     ymin = min(lows)
     ymax = max(highs)
     if reference_levels:
@@ -1341,7 +1316,6 @@ def generate_weekly_chart(
     output_path: Path | None = None,
     weeks: int = WEEKLY_CHART_WEEKS,
     level_segments: list[dict[str, Any]] | None = None,
-    signal_start_at: datetime | None = None,
     review_chart: bool = False,
 ) -> Path:
     """
@@ -1367,25 +1341,6 @@ def generate_weekly_chart(
     if len(weekly) < 4:
         raise RuntimeError(
             f"Not enough weekly chart history for {symbol}."
-        )
-
-    if signal_start_at is not None:
-        weekly = weekly_candles_for_signal_review(weekly, signal_start_at)
-        if len(weekly) < 4:
-            raise RuntimeError(
-                f"Not enough post-signal weekly chart history for {symbol}."
-            )
-
-    signal_focus_index = 0
-    if signal_start_at is not None:
-        signal_date = signal_start_at.date()
-        signal_focus_index = next(
-            (
-                index
-                for index, candle in enumerate(weekly)
-                if candle["date"].date() >= signal_date
-            ),
-            0,
         )
 
     reference_levels = [
@@ -1461,17 +1416,14 @@ def generate_weekly_chart(
         if isinstance(price, bool) or not isinstance(price, Real) or start_date is None:
             raise ValueError("Chart levels require numeric prices and ISO start dates.")
         level_price = float(price)
-        if review_chart:
-            start_index = 0.0
-        else:
-            start_index = next(
-                (
-                    index
-                    for index, candle in enumerate(weekly)
-                    if candle["date"].date() >= start_date.date()
-                ),
-                len(weekly) - 1,
-            )
+        start_index = next(
+            (
+                index
+                for index, candle in enumerate(weekly)
+                if candle["date"].date() >= start_date.date()
+            ),
+            len(weekly) - 1,
+        )
         ax.hlines(
             level_price,
             start_index,
@@ -1510,7 +1462,6 @@ def generate_weekly_chart(
         ymin, ymax = weekly_chart_price_limits(
             weekly,
             reference_levels=reference_levels,
-            focus_from_index=signal_focus_index,
         )
         ax.set_ylim(ymin, ymax)
 
@@ -4672,7 +4623,6 @@ async def run_review_button_bot() -> None:
                     if normalized_reference_level(record.get("reference_level")) is not None
                     else None
                 ),
-                signal_start_at=parse_iso_datetime(record["sent_at"]),
                 review_chart=True,
             )
             draft_channel = client.get_channel(signal_review_drafts_channel_id)

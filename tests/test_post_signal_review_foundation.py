@@ -807,42 +807,19 @@ class PostSignalReviewChartHelpersTests(unittest.TestCase):
             )
         return weekly
 
-    def test_weekly_candles_for_signal_review_keeps_lookback_and_future_weeks(self):
+    def test_weekly_chart_price_limits_include_reference_level(self):
         weekly = self.build_weekly("2026-05-05", 20, base=1.0)
-        signal_start = earnings_reactions.parse_iso_datetime(
-            "2026-08-11T09:30:00-04:00"
-        )
+        for candle in weekly[:15]:
+            candle["low"] = 1.2
+            candle["high"] = 1.6
 
-        sliced = earnings_reactions.weekly_candles_for_signal_review(
-            weekly,
-            signal_start,
-            lookback_weeks=3,
-        )
-
-        self.assertEqual(len(sliced), 9)
-        self.assertEqual(sliced[0]["date"].date().isoformat(), "2026-07-21")
-        self.assertEqual(sliced[-1]["date"].date().isoformat(), "2026-09-15")
-
-    def test_weekly_chart_price_limits_focuses_on_signal_window(self):
-        weekly = self.build_weekly("2026-05-05", 20, base=1.0)
-        weekly[0]["low"] = 0.5
-        weekly[0]["high"] = 6.0
-        weekly[0]["open"] = 5.5
-        weekly[0]["close"] = 5.8
-
-        ymin_all, ymax_all = earnings_reactions.weekly_chart_price_limits(
+        ymin, ymax = earnings_reactions.weekly_chart_price_limits(
             weekly,
             reference_levels=[1.07],
         )
-        ymin_focus, ymax_focus = earnings_reactions.weekly_chart_price_limits(
-            weekly,
-            reference_levels=[1.07],
-            focus_from_index=12,
-        )
 
-        self.assertLess(ymin_focus, 1.07)
-        self.assertGreater(ymax_focus, 1.07)
-        self.assertLess(ymax_focus - ymin_focus, ymax_all - ymin_all)
+        self.assertLess(ymin, 1.07)
+        self.assertGreater(ymax, 1.6)
 
     def test_format_chart_level_label_trims_trailing_zeros(self):
         self.assertEqual(earnings_reactions.format_chart_level_label(1.07), "1.07")
