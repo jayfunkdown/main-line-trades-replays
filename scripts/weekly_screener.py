@@ -644,24 +644,10 @@ def swing_low_index(weekly: list[dict[str, Any]], *, right_pad: int = 1) -> int 
 
 
 def origin_of_swing_low(weekly: list[dict[str, Any]], low_index: int) -> int | None:
-    """Body-high of the weekly swing whose move printed this low."""
-    swing_low = float(weekly[low_index]["low"])
-    origin: int | None = None
-    origin_body: float | None = None
-    for index in range(low_index - 1, 1, -1):
-        high = candle_body_high(weekly[index])
-        prior_lows = [float(weekly[j]["low"]) for j in range(max(0, index - 8), index)]
-        made_new_low = not prior_lows or swing_low < min(prior_lows) - 1e-9
-        if not made_new_low:
-            continue
-        if origin is None or high > origin_body:
-            origin = index
-            origin_body = high
-        left = candle_body_high(weekly[index - 1]) if index else high
-        right = candle_body_high(weekly[index + 1]) if index + 1 < low_index else high
-        if high >= left and high >= right and made_new_low:
-            return index
-    return origin
+    """The week that printed this low. Line goes on that week's body, not a prior bounce."""
+    if low_index < 0 or low_index >= len(weekly):
+        return None
+    return low_index
 
 
 def swing_high_index(weekly: list[dict[str, Any]], *, right_pad: int = 1) -> int | None:
@@ -683,24 +669,10 @@ def swing_high_index(weekly: list[dict[str, Any]], *, right_pad: int = 1) -> int
 
 
 def origin_of_swing_high(weekly: list[dict[str, Any]], high_index: int) -> int | None:
-    """Body-low of the weekly swing whose move printed this high."""
-    swing_high = float(weekly[high_index]["high"])
-    origin: int | None = None
-    origin_body: float | None = None
-    for index in range(high_index - 1, 1, -1):
-        low = candle_body_low(weekly[index])
-        prior_highs = [float(weekly[j]["high"]) for j in range(max(0, index - 8), index)]
-        made_new_high = not prior_highs or swing_high > max(prior_highs) + 1e-9
-        if not made_new_high:
-            continue
-        if origin is None or low < origin_body:
-            origin = index
-            origin_body = low
-        left = candle_body_low(weekly[index - 1]) if index else low
-        right = candle_body_low(weekly[index + 1]) if index + 1 < high_index else low
-        if low <= left and low <= right and made_new_high:
-            return index
-    return origin
+    """The week that printed this high. Line goes on that week's body, not a prior bounce."""
+    if high_index < 0 or high_index >= len(weekly):
+        return None
+    return high_index
 
 
 def _structure_hit(
@@ -751,7 +723,7 @@ def classify_weekly_structure(weekly: list[dict[str, Any]]) -> dict[str, Any]:
     low_index = swing_low_index(weekly)
     if low_index is not None:
         origin_index = origin_of_swing_low(weekly, low_index)
-        if origin_index is not None and origin_index < low_index:
+        if origin_index is not None:
             candidates.append(
                 _structure_hit(
                     side="gain",
@@ -767,7 +739,7 @@ def classify_weekly_structure(weekly: list[dict[str, Any]]) -> dict[str, Any]:
     high_index = swing_high_index(weekly)
     if high_index is not None:
         origin_index = origin_of_swing_high(weekly, high_index)
-        if origin_index is not None and origin_index < high_index:
+        if origin_index is not None:
             candidates.append(
                 _structure_hit(
                     side="loss",

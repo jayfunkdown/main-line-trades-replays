@@ -117,16 +117,16 @@ def make_weekly(rows: list[tuple[str, float, float, float, float]]) -> list[dict
 
 
 def lnsr_style_gain(*, close: float) -> list[dict]:
-    """Containment: origin body 6.42, new low ~5.00, then close through 6.42."""
+    """Containment: the week that made the ~5 low has body 6.42, then close through."""
     rows = [
         ("2026-04-06T20:00:00+00:00", 6.10, 6.30, 5.80, 6.00),
         ("2026-04-13T20:00:00+00:00", 6.00, 6.35, 5.85, 6.20),
         ("2026-04-20T20:00:00+00:00", 6.20, 6.40, 5.90, 6.10),
         ("2026-04-27T20:00:00+00:00", 6.10, 6.45, 5.95, 6.30),
-        ("2026-05-04T20:00:00+00:00", 6.30, 6.50, 6.00, 6.42),
-        ("2026-05-11T20:00:00+00:00", 6.40, 6.45, 5.70, 5.80),
+        ("2026-05-04T20:00:00+00:00", 6.30, 6.50, 6.00, 6.20),
+        ("2026-05-11T20:00:00+00:00", 6.42, 6.55, 5.00, 5.80),
         ("2026-05-18T20:00:00+00:00", 5.80, 5.90, 5.20, 5.40),
-        ("2026-05-25T20:00:00+00:00", 5.40, 5.60, 5.00, 5.20),
+        ("2026-05-25T20:00:00+00:00", 5.40, 5.60, 5.10, 5.20),
         ("2026-06-01T20:00:00+00:00", 5.20, 5.80, 5.10, 5.60),
         ("2026-06-08T20:00:00+00:00", 5.60, 6.10, 5.50, 5.90),
         ("2026-06-15T20:00:00+00:00", 5.90, close + 0.2, 5.80, close),
@@ -154,6 +154,29 @@ class WeeklyScreenerClassifierTests(unittest.TestCase):
         self.assertFalse(
             weekly_screener.is_retest(result["close"], result["level"], proximity=0.01)
         )
+
+    def test_bounce_before_the_low_is_not_the_weekly(self):
+        """IMXI: 14.54 bounce did not make the low; the 13.06 week did."""
+        weekly = make_weekly(
+            [
+                ("2026-04-10T20:00:00+00:00", 15.90, 16.00, 15.70, 15.80),
+                ("2026-04-17T20:00:00+00:00", 15.80, 15.95, 15.60, 15.70),
+                ("2026-04-24T20:00:00+00:00", 15.70, 15.80, 15.40, 15.50),
+                ("2026-05-01T20:00:00+00:00", 15.50, 15.60, 15.20, 15.30),
+                ("2026-05-08T20:00:00+00:00", 15.30, 15.40, 14.80, 15.00),
+                ("2026-05-15T20:00:00+00:00", 14.23, 14.75, 14.01, 14.54),
+                ("2026-05-22T20:00:00+00:00", 14.51, 14.67, 14.03, 14.50),
+                ("2026-05-29T20:00:00+00:00", 14.50, 14.50, 13.35, 13.42),
+                ("2026-06-05T20:00:00+00:00", 13.43, 13.53, 12.90, 13.03),
+                ("2026-06-12T20:00:00+00:00", 13.06, 13.50, 11.15, 11.86),
+                ("2026-06-19T20:00:00+00:00", 12.20, 12.72, 12.06, 12.19),
+                ("2026-06-26T20:00:00+00:00", 12.20, 14.61, 11.26, 14.59),
+            ]
+        )
+        result = weekly_screener.classify_weekly_structure(weekly)
+        self.assertEqual(result["side"], "gain")
+        self.assertAlmostEqual(result["level"], 13.06, places=2)
+        self.assertNotAlmostEqual(result["level"], 14.54, places=2)
 
     def test_same_week_close_within_one_percent_is_immediate_signal(self):
         weekly = lnsr_style_gain(close=6.47)
