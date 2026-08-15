@@ -1504,6 +1504,41 @@ def is_tradingview_orange_pixel(red: int, green: int, blue: int) -> bool:
     )
 
 
+def tradingview_row_longest_orange_run(
+    xs: list[int],
+) -> tuple[int, int, int]:
+    ordered = sorted(set(xs))
+    if not ordered:
+        return 0, 0, 0
+
+    best_length = 1
+    best_start = ordered[0]
+    best_end = ordered[0]
+    run_start = ordered[0]
+    previous = ordered[0]
+    run_length = 1
+
+    for x in ordered[1:]:
+        if x - previous <= 2:
+            run_length += 1
+            previous = x
+            continue
+        if run_length > best_length:
+            best_length = run_length
+            best_start = run_start
+            best_end = previous
+        run_start = x
+        previous = x
+        run_length = 1
+
+    if run_length > best_length:
+        best_length = run_length
+        best_start = run_start
+        best_end = previous
+
+    return best_start, best_end, best_length
+
+
 def detect_tradingview_reference_line_start_fraction(
     chart_bytes: bytes,
 ) -> float | None:
@@ -1538,13 +1573,17 @@ def detect_tradingview_reference_line_start_fraction(
     if not row_pixels:
         return None
 
-    best_row = max(
-        row_pixels,
-        key=lambda y: (
-            max(row_pixels[y]) - min(row_pixels[y]),
-            len(row_pixels[y]),
-        ),
-    )
+    best_row: int | None = None
+    best_run_length = 0
+    for y, xs in row_pixels.items():
+        _start, _end, run_length = tradingview_row_longest_orange_run(xs)
+        if run_length > best_run_length:
+            best_run_length = run_length
+            best_row = y
+
+    if best_row is None or best_run_length < 60:
+        return None
+
     orange_xs: list[int] = []
     for y in range(best_row - 2, best_row + 3):
         orange_xs.extend(row_pixels.get(y, []))
