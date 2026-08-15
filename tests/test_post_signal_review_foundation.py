@@ -939,6 +939,34 @@ class PostSignalReviewChartHelpersTests(unittest.TestCase):
             earnings_reactions.is_tradingview_dotted_horizontal_line(solid, 1000)
         )
 
+    def test_reference_line_start_ignores_left_edge_noise(self):
+        try:
+            from PIL import Image, ImageDraw
+        except ImportError:
+            self.skipTest("Pillow is unavailable")
+
+        image = Image.new("RGB", (1000, 600), "#131722")
+        draw = ImageDraw.Draw(image)
+        left, top, right, bottom = earnings_reactions.tradingview_plot_bounds(
+            1000,
+            600,
+        )
+        line_y = int((top + bottom) / 2)
+        noise_xs = list(range(left + 5, left + 35, 3))
+        solid_start = left + int((right - left) * 0.83)
+        solid_xs = list(range(solid_start, right - int((right - left) * 0.05)))
+        for x in noise_xs + solid_xs:
+            draw.point((x, line_y), fill=(0, 188, 212))
+
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        fraction = earnings_reactions.detect_tradingview_reference_line_start_fraction(
+            buffer.getvalue(),
+            12.21,
+        )
+        self.assertIsNotNone(fraction)
+        self.assertAlmostEqual(fraction, 0.83, delta=0.05)
+
     def test_default_review_chart_horizon_start_is_fallback(self):
         sent_at = earnings_reactions.parse_iso_datetime(
             "2026-08-14T07:25:34-04:00"

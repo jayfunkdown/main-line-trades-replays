@@ -1557,6 +1557,36 @@ def tradingview_row_longest_run(
     return best_start, best_end, best_length
 
 
+def tradingview_row_earliest_significant_run(
+    xs: list[int],
+    min_run: int,
+) -> tuple[int, int, int]:
+    ordered = sorted(set(xs))
+    if not ordered:
+        return 0, 0, 0
+
+    runs: list[tuple[int, int, int]] = []
+    run_start = ordered[0]
+    previous = ordered[0]
+    run_length = 1
+
+    for x in ordered[1:]:
+        if x - previous <= 2:
+            run_length += 1
+            previous = x
+            continue
+        runs.append((run_start, previous, run_length))
+        run_start = x
+        previous = x
+        run_length = 1
+    runs.append((run_start, previous, run_length))
+
+    significant = [run for run in runs if run[2] >= min_run]
+    if significant:
+        return significant[0]
+    return max(runs, key=lambda item: item[2])
+
+
 def is_tradingview_dotted_horizontal_line(
     xs: list[int],
     plot_width: int,
@@ -1641,6 +1671,11 @@ def estimate_tradingview_price_at_y(
 def find_tradingview_solid_reference_lines(
     image: Any,
 ) -> list[dict[str, Any]]:
+    from PIL import Image
+
+    if not isinstance(image, Image.Image):
+        return []
+    image = image.convert("RGB")
     width, height = image.size
     left, top, right, bottom = tradingview_plot_bounds(width, height)
     plot_width = right - left
@@ -1662,7 +1697,10 @@ def find_tradingview_solid_reference_lines(
     for y, xs in row_pixels.items():
         if is_tradingview_dotted_horizontal_line(xs, plot_width):
             continue
-        run_start, run_end, run_length = tradingview_row_longest_run(xs)
+        run_start, run_end, run_length = tradingview_row_earliest_significant_run(
+            xs,
+            TRADINGVIEW_SOLID_LINE_MIN_RUN,
+        )
         if run_length < TRADINGVIEW_SOLID_LINE_MIN_RUN:
             continue
         if (
@@ -1672,11 +1710,7 @@ def find_tradingview_solid_reference_lines(
         ):
             continue
 
-        label_cutoff = right - int(plot_width * 0.08)
-        body_xs = [x for x in xs if x < label_cutoff] or xs
-        left_edge = left + int(plot_width * 0.02)
-        min_x = min(body_xs)
-        start_x = run_start if min_x <= left_edge else min_x
+        start_x = run_start
         estimated_price = estimate_tradingview_price_at_y(image, y)
         lines.append(
             {
