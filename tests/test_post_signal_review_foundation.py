@@ -903,6 +903,31 @@ class PostSignalReviewChartHelpersTests(unittest.TestCase):
         self.assertEqual(sliced[0]["date"].date().isoformat(), "2021-09-06")
         self.assertLess(len(sliced), len(weekly))
 
+    def test_detect_tradingview_reference_line_start_fraction(self):
+        try:
+            from PIL import Image, ImageDraw
+        except ImportError:
+            self.skipTest("Pillow is unavailable")
+
+        image = Image.new("RGB", (1000, 600), "#131722")
+        draw = ImageDraw.Draw(image)
+        left, top, right, bottom = earnings_reactions.tradingview_plot_bounds(
+            1000,
+            600,
+        )
+        line_y = int((top + bottom) / 2)
+        start_x = left + int((right - left) * 0.25)
+        end_x = right - int((right - left) * 0.05)
+        draw.line((start_x, line_y, end_x, line_y), fill=(255, 152, 0), width=2)
+
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        fraction = earnings_reactions.detect_tradingview_reference_line_start_fraction(
+            buffer.getvalue()
+        )
+        self.assertIsNotNone(fraction)
+        self.assertAlmostEqual(fraction, 0.25, delta=0.03)
+
     def test_default_review_chart_horizon_start_is_fallback(self):
         sent_at = earnings_reactions.parse_iso_datetime(
             "2026-08-14T07:25:34-04:00"

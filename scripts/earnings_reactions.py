@@ -1486,6 +1486,81 @@ def infer_tradingview_horizon_date(
     return None
 
 
+def tradingview_plot_bounds(width: int, height: int) -> tuple[int, int, int, int]:
+    return (
+        int(width * 0.028),
+        int(height * 0.059),
+        int(width * 0.87),
+        int(height * 0.82),
+    )
+
+
+def is_tradingview_orange_pixel(red: int, green: int, blue: int) -> bool:
+    return (
+        red > 180
+        and 90 < green < 220
+        and blue < 120
+        and red > green > blue
+    )
+
+
+def detect_tradingview_reference_line_start_fraction(
+    chart_bytes: bytes,
+) -> float | None:
+    """Return where the user's orange reference line begins within the plot."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+
+    try:
+        image = Image.open(io.BytesIO(chart_bytes)).convert("RGB")
+    except OSError:
+        return None
+
+    width, height = image.size
+    left, top, right, bottom = tradingview_plot_bounds(width, height)
+    plot_width = right - left
+    if plot_width <= 1:
+        return None
+
+    row_pixels: dict[int, list[int]] = {}
+    pixels = image.load()
+    for y in range(top, bottom):
+        row: list[int] = []
+        for x in range(left, right):
+            red, green, blue = pixels[x, y]
+            if is_tradingview_orange_pixel(red, green, blue):
+                row.append(x)
+        if row:
+            row_pixels[y] = row
+
+    if not row_pixels:
+        return None
+
+    best_row = max(
+        row_pixels,
+        key=lambda y: (
+            max(row_pixels[y]) - min(row_pixels[y]),
+            len(row_pixels[y]),
+        ),
+    )
+    orange_xs: list[int] = []
+    for y in range(best_row - 2, best_row + 3):
+        orange_xs.extend(row_pixels.get(y, []))
+    if len(orange_xs) < 40:
+        return None
+
+    label_cutoff = right - int(plot_width * 0.08)
+    body_xs = [x for x in orange_xs if x < label_cutoff]
+    if len(body_xs) < 40:
+        body_xs = orange_xs
+
+    start_x = min(body_xs)
+    fraction = (start_x - left) / plot_width
+    return max(0.0, min(1.0, fraction))
+
+
 def detect_review_chart_horizon_start(
     chart_bytes: bytes,
     sent_at: datetime,
@@ -1570,6 +1645,7 @@ def generate_weekly_chart(
     level_segments: list[dict[str, Any]] | None = None,
     review_chart: bool = False,
     chart_horizon_start_at: datetime | None = None,
+    reference_line_start_fraction: float | None = None,
 ) -> Path:
     """
     Generate the earnings weekly candlestick chart.
@@ -1677,14 +1753,21 @@ def generate_weekly_chart(
         if isinstance(price, bool) or not isinstance(price, Real) or start_date is None:
             raise ValueError("Chart levels require numeric prices and ISO start dates.")
         level_price = float(price)
-        line_start = next(
-            (
-                index
-                for index, candle in enumerate(weekly)
-                if candle["date"].date() >= start_date.date()
-            ),
-            len(weekly) - 1,
-        )
+        if (
+            review_chart
+            and reference_line_start_fraction is not None
+            and len(weekly) > 1
+        ):
+            line_start = reference_line_start_fraction * (len(weekly) - 1)
+        else:
+            line_start = next(
+                (
+                    index
+                    for index, candle in enumerate(weekly)
+                    if candle["date"].date() >= start_date.date()
+                ),
+                len(weekly) - 1,
+            )
         ax.hlines(
             level_price,
             line_start,
@@ -4877,6 +4960,11 @@ async def run_review_button_bot() -> None:
                 chart_horizon_start_at = default_review_chart_horizon_start(
                     sent_at
                 )
+            reference_line_start_fraction = (
+                detect_tradingview_reference_line_start_fraction(
+                    original_chart_bytes
+                )
+            )
             chart_path = temporary_weekly_chart_path(record["symbol"])
             chart_path = await asyncio.to_thread(
                 generate_weekly_chart,
@@ -4894,6 +4982,7 @@ async def run_review_button_bot() -> None:
                 ),
                 review_chart=True,
                 chart_horizon_start_at=chart_horizon_start_at,
+                reference_line_start_fraction=reference_line_start_fraction,
             )
             draft_channel = client.get_channel(signal_review_drafts_channel_id)
             if draft_channel is None:
