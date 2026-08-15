@@ -2608,11 +2608,7 @@ def build_post_signal_review_message(
             if private
             else "The updated chart was reviewed against the original setup."
         )
-    verification = (
-        "✅ Updated chart verified by staff."
-        if record.get("comparison_chart_verified")
-        else "⚠️ Updated chart requires staff verification before publishing."
-    )
+    verification = post_signal_review_verification_line(record)
     reference_level = normalized_reference_level(record.get("reference_level"))
     current_price = normalized_reference_level(record.get("current_price"))
     performance = direction_adjusted_performance(
@@ -2668,17 +2664,31 @@ def build_post_signal_review_message(
     return "\n".join(lines)
 
 
-def build_post_signal_chart_embed(
-    discord_module: Any,
-    title: str,
-    image_url: str,
-) -> Any:
-    embed = discord_module.Embed(
-        title=title,
-        color=BRAND_NEON_PINK,
+def post_signal_review_verification_line(record: dict[str, Any]) -> str:
+    if not record.get("comparison_chart_verified"):
+        return "⚠️ Updated chart requires staff verification before publishing."
+    history = record.get("review_history", [])
+    if isinstance(history, list) and any(
+        isinstance(entry, dict) and entry.get("action") == "edited"
+        for entry in history
+    ):
+        return "✅ Updated chart verified by staff."
+    return "✅ System-generated comparison chart ready for review."
+
+
+def post_signal_review_chart_filenames(
+    record: dict[str, Any],
+) -> tuple[str, str]:
+    symbol = str(record.get("symbol") or "Signal")
+    original = str(
+        record.get("original_review_chart_filename")
+        or f"{symbol}_original.png"
     )
-    embed.set_image(url=image_url)
-    return embed
+    updated = str(
+        record.get("updated_review_chart_filename")
+        or f"{symbol}_updated.png"
+    )
+    return original, updated
 
 
 def build_post_signal_review_layout(
@@ -3091,7 +3101,6 @@ def update_manual_signal_draft(
     trade_direction: str,
     timeframe: str,
     setup_name: str,
-    reference_level: Any,
     chart: dict[str, str] | None,
     updated_at: str,
 ) -> tuple[dict[str, Any], str]:
@@ -3115,13 +3124,12 @@ def update_manual_signal_draft(
             outcome = "unavailable"
             return
         normalized_direction = normalized_trade_direction(trade_direction)
-        normalized_level = normalized_reference_level(reference_level)
         if not is_valid_manual_signal_fields(
             instrument,
             trade_thesis,
             timeframe,
             setup_name,
-        ) or normalized_direction is None or normalized_level is None:
+        ) or normalized_direction is None:
             outcome = "invalid"
             return
         if chart is not None and not is_valid_manual_chart_metadata(chart):
@@ -3134,7 +3142,6 @@ def update_manual_signal_draft(
                 "trade_direction": normalized_direction,
                 "timeframe": timeframe.strip(),
                 "setup_name": setup_name.strip(),
-                "reference_level": normalized_level,
                 "updated_at": updated_at,
             }
         )
@@ -3331,7 +3338,6 @@ def claim_signal_delivery(
     attempt_id: str,
     started_at: str,
     trade_direction: str | None = None,
-    reference_level: Any = None,
 ) -> tuple[dict[str, Any], str]:
     """Atomically move one ready queue record to sending."""
     outcome = "missing"
@@ -3364,13 +3370,8 @@ def claim_signal_delivery(
         if direction is None:
             outcome = "direction_required"
             return
-        level = normalized_reference_level(reference_level)
-        if level is None:
-            outcome = "reference_level_required"
-            return
 
         item["trade_direction"] = direction
-        item["reference_level"] = level
         item["delivery_status"] = SIGNAL_DELIVERY_SENDING
         item["delivery_attempt_id"] = attempt_id
         item["delivery_started_at"] = started_at
@@ -4128,58 +4129,61 @@ async def run_review_button_bot() -> None:
                 await send_ephemeral_rejection(interaction, "This review could not be updated.")
                 return
             record = latest["post_signal_reviews"][self.review_id]
-            existing_embeds = list(
-                getattr(getattr(interaction, "message", None), "embeds", []) or []
+            now = datetime.now(EASTERN)
+            original_filename, updated_filename = post_signal_review_chart_filenames(
+                record
             )
-            content_embed = discord.Embed.from_dict(
-                bordered_embed(
-                    build_post_signal_review_message(
-                        record,
-                        datetime.now(EASTERN),
-                        private=True,
-                    ),
-                    color=BRAND_NEON_PINK,
-                )
+            updated_view = PostSignalReviewView(
+                build_post_signal_review_message(record, now, private=True),
+                original_filename,
+                updated_filename,
             )
             if replacement_file is None:
-                await interaction.response.edit_message(
-                    embeds=[content_embed, *existing_embeds[1:]],
-                    view=PostSignalReviewView(),
+                await interaction.response.edit_message(view=updated_view)
+                return
+            draft_message = getattr(interaction, "message", None)
+            attachments = list(
+                getattr(draft_message, "attachments", []) or []
+            )
+            if not attachments:
+                await send_ephemeral_rejection(
+                    interaction,
+                    "The draft charts are unavailable. Please try again.",
                 )
-            else:
-                record["comparison_chart_verified"] = requested_chart_verification
-                original_embed = existing_embeds[1] if len(existing_embeds) > 1 else None
-                comparison_embed = build_post_signal_chart_embed(
-                    discord,
-                    "Updated Weekly Chart — Staff Verified",
-                    f"attachment://{replacement_filename}",
+                return
+            try:
+                original_file = await attachments[0].to_file(
+                    filename=original_filename,
+                    use_cached=True,
                 )
-                await interaction.response.edit_message(
-                    embeds=[
-                        content_embed,
-                        *([original_embed] if original_embed is not None else []),
-                        comparison_embed,
-                    ],
-                    attachments=[replacement_file],
-                    view=PostSignalReviewView(),
+            except Exception:
+                await send_ephemeral_rejection(
+                    interaction,
+                    "The original chart could not be retained. No review changes were saved.",
                 )
-                try:
-                    _, persisted_outcome = edit_post_signal_review(
-                        self.review_id,
-                        self.draft_message_id,
-                        datetime.now(EASTERN).isoformat(),
-                        outcome=str(self.outcome),
-                        summary=str(self.summary),
-                        comparison_chart_verified=requested_chart_verification,
-                    )
-                except EarningsStateError:
-                    persisted_outcome = "invalid"
-                if persisted_outcome != "updated":
-                    await send_ephemeral_rejection(
-                        interaction,
-                        "The corrected chart was attached, but verification was not saved. "
-                        "Publishing remains blocked; please edit the review again.",
-                    )
+                return
+            record["comparison_chart_verified"] = requested_chart_verification
+            await interaction.response.edit_message(
+                view=updated_view,
+                attachments=[original_file, replacement_file],
+            )
+            try:
+                _, persisted_outcome = edit_post_signal_review(
+                    self.review_id,
+                    self.draft_message_id,
+                    now.isoformat(),
+                    outcome=str(self.outcome),
+                    summary=str(self.summary),
+                    comparison_chart_verified=requested_chart_verification,
+                )
+            except EarningsStateError:
+                persisted_outcome = "invalid"
+            if persisted_outcome != "updated":
+                await send_ephemeral_rejection(
+                    interaction,
+                    "The corrected chart was attached, but verification was not saved. "
+                    "Publishing remains blocked; please edit the review again.",
+                )
 
     class PostSignalReviewView(discord.ui.LayoutView):
         def __init__(
@@ -4198,6 +4202,15 @@ async def run_review_button_bot() -> None:
                 await self.publish(interaction, publish_button)
 
             publish_button.callback = publish_callback
+            edit_button = discord.ui.Button(
+                label="Edit",
+                style=discord.ButtonStyle.primary,
+                custom_id="post_signal_review_edit",
+            )
+            async def edit_callback(interaction: Any) -> None:
+                await self.edit_review(interaction, edit_button)
+
+            edit_button.callback = edit_callback
             defer_button = discord.ui.Button(
                 label="Review in 1 Month",
                 style=discord.ButtonStyle.secondary,
@@ -4216,14 +4229,16 @@ async def run_review_button_bot() -> None:
                 await self.dismiss(interaction, dismiss_button)
 
             dismiss_button.callback = dismiss_callback
+            action_buttons = [
+                publish_button,
+                edit_button,
+                defer_button,
+                dismiss_button,
+            ]
             if content is None:
                 self.add_item(
                     discord.ui.Container(
-                        discord.ui.ActionRow(
-                            publish_button,
-                            defer_button,
-                            dismiss_button,
-                        ),
+                        discord.ui.ActionRow(*action_buttons),
                         accent_color=BRAND_NEON_PINK,
                     )
                 )
@@ -4233,7 +4248,7 @@ async def run_review_button_bot() -> None:
                     content,
                     original_filename,
                     updated_filename,
-                    action_buttons=[publish_button, defer_button, dismiss_button],
+                    action_buttons=action_buttons,
                 )
                 for item in built.children:
                     self.add_item(item)
@@ -4395,6 +4410,20 @@ async def run_review_button_bot() -> None:
                     review_id,
                     "published",
                 )
+                await send_ephemeral_rejection(
+                    interaction,
+                    "Review published.",
+                )
+
+        async def edit_review(self, interaction: Any, button: Any) -> None:
+            resolved = await self.resolve(interaction)
+            if resolved is None:
+                await send_ephemeral_rejection(interaction, "This review is unavailable.")
+                return
+            review_id, record, message = resolved
+            await interaction.response.send_modal(
+                PostSignalReviewEditModal(review_id, str(message.id), record)
+            )
 
         async def defer_review(self, interaction: Any, button: Any) -> None:
             resolved = await self.resolve(interaction)
@@ -4408,6 +4437,10 @@ async def run_review_button_bot() -> None:
                     "Rescheduling this review for one calendar month from today.",
                 )
             except (asyncio.TimeoutError, discord.HTTPException):
+                await send_ephemeral_rejection(
+                    interaction,
+                    "Discord did not accept that action. Please try again.",
+                )
                 return
             try:
                 _state, outcome = defer_post_signal_review(
@@ -4436,6 +4469,10 @@ async def run_review_button_bot() -> None:
             try:
                 await respond_ephemeral_now(interaction, "Dismissing this review.")
             except (asyncio.TimeoutError, discord.HTTPException):
+                await send_ephemeral_rejection(
+                    interaction,
+                    "Discord did not accept that action. Please try again.",
+                )
                 return
             attempt_id = uuid.uuid4().hex
             try:
@@ -4542,6 +4579,7 @@ async def run_review_button_bot() -> None:
                 chart_path,
                 filename=updated_filename,
             )
+            record["comparison_chart_verified"] = True
             review_view = PostSignalReviewView(
                 build_post_signal_review_message(record, now, private=True),
                 original_filename,
@@ -4568,6 +4606,7 @@ async def run_review_button_bot() -> None:
                     "updated_review_chart_filename": updated_filename,
                     "draft_created_at": datetime.now(EASTERN).isoformat(),
                     "current_price": current_price,
+                    "comparison_chart_verified": True,
                 },
             )
             if confirmation != "transitioned":
@@ -4808,17 +4847,6 @@ async def run_review_button_bot() -> None:
                 default=record.get("timeframe") or "Weekly",
                 custom_id="manual_signal_timeframe",
             )
-            self.reference_level = discord.ui.TextInput(
-                required=True,
-                max_length=30,
-                default=(
-                    str(record["reference_level"])
-                    if normalized_reference_level(record.get("reference_level")) is not None
-                    else None
-                ),
-                placeholder="Price of the single line on your chart",
-                custom_id="manual_signal_reference_level",
-            )
             current_direction = normalized_trade_direction(
                 record.get("trade_direction")
             )
@@ -4859,7 +4887,6 @@ async def run_review_button_bot() -> None:
             )
             fields = [("Instrument or symbol", self.instrument)]
             fields.append(("Trade direction", self.trade_direction))
-            fields.append(("Reference level", self.reference_level))
             if self.setup_name is not None:
                 fields.append(("Setup name (optional)", self.setup_name))
             fields.append(("Trade thesis", self.trade_thesis))
@@ -4889,7 +4916,7 @@ async def run_review_button_bot() -> None:
             else:
                 await self._submit_new(interaction)
 
-        def fields(self) -> tuple[str, str, str, str, float | None]:
+        def fields(self) -> tuple[str, str, str, str]:
             return (
                 str(self.instrument.value).strip(),
                 str(self.trade_thesis.value).strip(),
@@ -4899,7 +4926,6 @@ async def run_review_button_bot() -> None:
                     if self.setup_name is not None
                     else ""
                 ),
-                normalized_reference_level(str(self.reference_level.value).strip()),
             )
 
         def selected_direction(self) -> str | None:
@@ -4925,18 +4951,12 @@ async def run_review_button_bot() -> None:
                     "This signal form is no longer available.",
                 )
                 return
-            instrument, thesis, timeframe, setup_name, reference_level = self.fields()
+            instrument, thesis, timeframe, setup_name = self.fields()
             trade_direction = self.selected_direction()
             if trade_direction is None:
                 await send_ephemeral_rejection(
                     interaction,
                     "Select Long or Short before creating this signal.",
-                )
-                return
-            if reference_level is None:
-                await send_ephemeral_rejection(
-                    interaction,
-                    "Enter the price of the single reference line on the chart.",
                 )
                 return
             if not is_valid_manual_signal_fields(
@@ -4968,7 +4988,6 @@ async def run_review_button_bot() -> None:
                     trade_direction=trade_direction,
                     timeframe=timeframe,
                     setup_name=setup_name,
-                    reference_level=reference_level,
                 )
                 draft_message = await draft_channel.send(
                     embed=build_bordered_discord_embed(
@@ -5015,7 +5034,6 @@ async def run_review_button_bot() -> None:
                 "trade_direction": trade_direction,
                 "timeframe": timeframe,
                 "setup_name": setup_name,
-                "reference_level": reference_level,
                 "chart": manual_chart_metadata(stored_attachment),
                 "created_at": now,
                 "updated_at": now,
@@ -5062,18 +5080,12 @@ async def run_review_button_bot() -> None:
                     "This signal draft is no longer available.",
                 )
                 return
-            instrument, thesis, timeframe, setup_name, reference_level = self.fields()
+            instrument, thesis, timeframe, setup_name = self.fields()
             trade_direction = self.selected_direction()
             if trade_direction is None:
                 await send_ephemeral_rejection(
                     interaction,
                     "Select Long or Short before updating this signal.",
-                )
-                return
-            if reference_level is None:
-                await send_ephemeral_rejection(
-                    interaction,
-                    "Enter the price of the single reference line on the chart.",
                 )
                 return
             setup_name = record["setup_name"]
@@ -5101,7 +5113,6 @@ async def run_review_button_bot() -> None:
                 trade_direction=trade_direction,
                 timeframe=timeframe,
                 setup_name=setup_name,
-                reference_level=reference_level,
             )
             chart = None
             try:
@@ -5159,7 +5170,6 @@ async def run_review_button_bot() -> None:
                     trade_direction=trade_direction,
                     timeframe=timeframe,
                     setup_name=setup_name,
-                    reference_level=reference_level,
                     chart=chart,
                     updated_at=datetime.now(EASTERN).isoformat(),
                 )
@@ -5232,7 +5242,6 @@ async def run_review_button_bot() -> None:
                 if outcome != "claimed":
                     messages = {
                         "direction_required": "Select Long or Short before publishing.",
-                        "reference_level_required": "Enter the chart reference level before publishing.",
                         MANUAL_SIGNAL_SENDING: "This signal is already being published.",
                         MANUAL_SIGNAL_SENT: "This signal was already published.",
                         MANUAL_SIGNAL_UNKNOWN: "This signal needs staff reconciliation before retrying.",
@@ -5300,7 +5309,6 @@ async def run_review_button_bot() -> None:
                     trade_direction=record.get("trade_direction"),
                     timeframe=record["timeframe"],
                     setup_name=record["setup_name"],
-                    reference_level=record.get("reference_level"),
                 )
                 if len(content) > MANUAL_SIGNAL_MAX_CONTENT_LENGTH:
                     await finish(
@@ -5423,7 +5431,6 @@ async def run_review_button_bot() -> None:
                         trade_thesis=record["trade_thesis"],
                         original_chart_filename=chart_filename,
                         sent_at=sent_at,
-                        reference_level=record.get("reference_level"),
                     )
                     _state, confirmation = transition_manual_signal_delivery(
                         draft_id,
@@ -5648,12 +5655,6 @@ async def run_review_button_bot() -> None:
                 max_length=1800,
                 custom_id="trade_thesis",
             )
-            self.reference_level = discord.ui.TextInput(
-                placeholder="Price of the single line on your chart",
-                required=True,
-                max_length=30,
-                custom_id="trade_reference_level",
-            )
 
             self.trade_chart = discord.ui.FileUpload(
                 custom_id="trade_chart",
@@ -5667,14 +5668,6 @@ async def run_review_button_bot() -> None:
                     text="Trade Direction",
                     description="Required. Choose the intended trade outcome.",
                     component=self.trade_direction,
-                )
-            )
-
-            self.add_item(
-                discord.ui.Label(
-                    text="Reference Level",
-                    description="Required. Enter the price of the single chart line.",
-                    component=self.reference_level,
                 )
             )
 
@@ -5833,15 +5826,6 @@ async def run_review_button_bot() -> None:
             thesis = str(
                 self.trade_thesis.value
             ).strip()
-            reference_level = normalized_reference_level(
-                str(self.reference_level.value).strip()
-            )
-            if reference_level is None:
-                await send_ephemeral_rejection(
-                    interaction,
-                    "Enter the price of the single reference line on the chart.",
-                )
-                return
 
             uploads = list(
                 self.trade_chart.values
@@ -5898,7 +5882,6 @@ async def run_review_button_bot() -> None:
                     attempt_id,
                     attempt_started_at,
                     trade_direction=trade_direction,
-                    reference_level=reference_level,
                 )
             except EarningsStateError:
                 await send_ephemeral_rejection(
@@ -6008,7 +5991,6 @@ async def run_review_button_bot() -> None:
                     candidate,
                     thesis,
                     trade_direction,
-                    reference_level,
                 )
             except asyncio.CancelledError:
                 try:
@@ -6100,7 +6082,6 @@ async def run_review_button_bot() -> None:
             signal_updates = {
                 "trade_thesis": thesis,
                 "trade_direction": trade_direction,
-                "reference_level": reference_level,
                 "sent_at": sent_at,
                 "sent_by": str(interaction.user),
                 "signal_chart_filename": attachment.filename,
@@ -6119,7 +6100,6 @@ async def run_review_button_bot() -> None:
                     trade_thesis=thesis,
                     original_chart_filename=attachment.filename,
                     sent_at=sent_at,
-                    reference_level=reference_level,
                 )
                 latest_state, confirmation_outcome = (
                     transition_signal_delivery(

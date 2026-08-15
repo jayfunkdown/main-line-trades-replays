@@ -145,6 +145,37 @@ class PostSignalReviewRecordTests(unittest.TestCase):
         self.assertIn("requires staff verification", message)
         self.assertIn("not a claim of realized profit", message)
 
+    def test_system_generated_chart_shows_ready_for_review_message(self):
+        record = self.build_record()
+        record["comparison_chart_verified"] = True
+        message = earnings_reactions.build_post_signal_review_message(
+            record,
+            earnings_reactions.datetime.fromisoformat(
+                "2026-09-11T09:30:00-04:00"
+            ),
+            private=True,
+        )
+        self.assertIn("System-generated comparison chart ready for review", message)
+
+    def test_staff_verified_chart_message_takes_precedence(self):
+        record = self.build_record()
+        record["comparison_chart_verified"] = True
+        record["review_history"] = [
+            {
+                "action": "edited",
+                "at": "2026-09-11T09:35:00-04:00",
+                "review_cycle": 1,
+            }
+        ]
+        message = earnings_reactions.build_post_signal_review_message(
+            record,
+            earnings_reactions.datetime.fromisoformat(
+                "2026-09-11T09:30:00-04:00"
+            ),
+            private=True,
+        )
+        self.assertIn("Updated chart verified by staff", message)
+
     def test_performance_is_direction_adjusted_from_the_single_reference_level(self):
         self.assertEqual(
             earnings_reactions.direction_adjusted_performance(100, 90, "short"),
@@ -234,6 +265,33 @@ class PostSignalReviewRecordTests(unittest.TestCase):
         self.assertEqual(len(galleries), 2)
         self.assertEqual(galleries[0]["items"][0]["media"]["url"], "attachment://original.png")
         self.assertEqual(galleries[1]["items"][0]["media"]["url"], "attachment://updated.png")
+
+    def test_draft_creation_auto_verifies_system_generated_chart(self):
+        source = Path(earnings_reactions.__file__).read_text(encoding="utf-8")
+        create = source[
+            source.index("    async def create_due_post_signal_review_draft("):
+            source.index("    async def post_signal_review_scheduler(")
+        ]
+        self.assertIn('record["comparison_chart_verified"] = True', create)
+        self.assertIn('"comparison_chart_verified": True', create)
+
+    def test_review_view_includes_edit_button(self):
+        source = Path(earnings_reactions.__file__).read_text(encoding="utf-8")
+        view = source[
+            source.index("    class PostSignalReviewView("):
+            source.index("    async def resolve_original_signal_chart_url")
+        ]
+        self.assertIn('custom_id="post_signal_review_edit"', view)
+        self.assertIn("async def edit_review(", view)
+
+    def test_edit_modal_updates_layout_view_not_embeds(self):
+        source = Path(earnings_reactions.__file__).read_text(encoding="utf-8")
+        modal = source[
+            source.index("    class PostSignalReviewEditModal("):
+            source.index("    class PostSignalReviewView(")
+        ]
+        self.assertIn("await interaction.response.edit_message(view=updated_view)", modal)
+        self.assertNotIn("embeds=[content_embed", modal)
 
     def test_defer_and_dismiss_complete_response_then_use_bounded_delete(self):
         source = Path(earnings_reactions.__file__).read_text(encoding="utf-8")

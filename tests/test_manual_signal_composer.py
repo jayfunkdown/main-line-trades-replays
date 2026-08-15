@@ -471,7 +471,6 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
         modal.instrument._value = "EUR/USD"
         modal.trade_thesis._value = "Hold the breakout."
         modal.timeframe._value = "4h"
-        modal.reference_level._value = "1.2345"
         modal.trade_direction._values = ["long"]
         modal.trade_chart._values = [self.attachment()]
         submit = self.interaction(client)
@@ -490,7 +489,6 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
                     trade_direction="long",
                     timeframe="4h",
                     setup_name="",
-                    reference_level=1.2345,
                 ),
                 "color": 0xFF2BD6,
                 "image": {"url": "attachment://chart.png"},
@@ -502,7 +500,6 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record["draft_message_id"], "400")
         self.assertEqual(record["delivery_status"], "ready")
         self.assertEqual(record["trade_direction"], "long")
-        self.assertEqual(record["reference_level"], 1.2345)
 
     async def test_new_signal_form_requires_direction_before_draft_creation(self):
         client, tree, _view = await self.start_bot()
@@ -521,7 +518,6 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
         modal.instrument._value = "EUR/USD"
         modal.trade_thesis._value = "Hold the breakout."
         modal.timeframe._value = "4h"
-        modal.reference_level._value = "1.2345"
         modal.trade_chart._values = [self.attachment()]
         submit = self.interaction(client)
         await modal.on_submit(submit)
@@ -589,7 +585,6 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(modal.trade_direction.options[1].default)
         modal.trade_thesis._value = "Edited thesis"
         modal.trade_direction._values = ["short"]
-        modal.reference_level._value = "1.2345"
         modal.trade_chart._values = []
         submit = self.interaction(client, message=message)
         with patch.object(
@@ -611,10 +606,6 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.state["manual_signal_drafts"]["draft"]["trade_direction"],
             "short",
-        )
-        self.assertEqual(
-            self.state["manual_signal_drafts"]["draft"]["reference_level"],
-            1.2345,
         )
         self.assertEqual(
             self.state["manual_signal_drafts"]["draft"]["setup_name"],
@@ -981,7 +972,6 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
             await self.button(view, "manual_signal_edit").callback(open_interaction)
         modal = open_interaction.response.modal
         modal.trade_thesis._value = "Completely updated thesis"
-        modal.reference_level._value = "1.2345"
         replacement = self.attachment(
             "updated.webp", "image/webp", 502
         )
@@ -1054,7 +1044,6 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
             await self.button(view, "manual_signal_edit").callback(open_interaction)
         modal = open_interaction.response.modal
         modal.trade_thesis._value = "Losing edit"
-        modal.reference_level._value = "1.2345"
         modal.trade_chart._values = []
 
         send_started = asyncio.Event()
@@ -1120,7 +1109,6 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
             await self.button(view, "manual_signal_edit").callback(open_interaction)
         modal = open_interaction.response.modal
         modal.trade_thesis._value = "Losing edit"
-        modal.reference_level._value = "1.2345"
         modal.trade_chart._values = []
         cancel_interaction = self.interaction(client, message=message)
         edit_submit = self.interaction(client, message=message)
@@ -1200,8 +1188,6 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
             second_modal = await open_edit(second_message)
         first_modal.trade_thesis._value = "First updated"
         second_modal.trade_thesis._value = "Second updated"
-        first_modal.reference_level._value = "1.2345"
-        second_modal.reference_level._value = "1.2345"
         first_submit = self.interaction(client, message=first_message)
         second_submit = self.interaction(client, message=second_message)
         self.drafts.fetch_message.side_effect = lambda message_id: messages[message_id]
