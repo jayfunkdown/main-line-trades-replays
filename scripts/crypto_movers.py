@@ -10,7 +10,7 @@ Required for --post:
 
 Optional:
     COINGECKO_API_KEY
-    CRYPTO_MOVERS_DAILY_MAX=5
+    CRYPTO_MOVERS_DAILY_MAX=10
     CRYPTO_MOVERS_MIN_MOVE_PCT=5
     CRYPTO_MOVERS_PRIORITY_MIN_MOVE_PCT=3
     CRYPTO_MOVERS_UNIVERSE_SIZE=100
@@ -36,9 +36,23 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 try:
-    from scripts.discord_embeds import BRAND_NEON_PINK, bordered_webhook_payload
+    from scripts.discord_embeds import BRAND_NEON_PINK, bordered_embed
+    from scripts.earnings_reactions import (
+        cleanup_weekly_chart,
+        generate_weekly_chart,
+        multipart_body,
+        temporary_weekly_chart_path,
+        weekly_chart_filename,
+    )
 except ModuleNotFoundError:
-    from discord_embeds import BRAND_NEON_PINK, bordered_webhook_payload
+    from discord_embeds import BRAND_NEON_PINK, bordered_embed
+    from earnings_reactions import (
+        cleanup_weekly_chart,
+        generate_weekly_chart,
+        multipart_body,
+        temporary_weekly_chart_path,
+        weekly_chart_filename,
+    )
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -212,18 +226,6 @@ def format_compact_usd(value: float | None) -> str:
     return f"${value:,.0f}"
 
 
-def format_price(price: float | None) -> str:
-    if price is None:
-        return "Not available"
-
-    if price >= 1000:
-        return f"${price:,.2f}"
-
-    if price >= 1:
-        return f"${price:,.4f}".rstrip("0").rstrip(".")
-
-    return f"${price:,.6f}".rstrip("0").rstrip(".")
-
 
 def calculate_candidate(coin: dict[str, Any]) -> dict[str, Any]:
     symbol = str(coin.get("symbol", "")).upper()
@@ -317,7 +319,6 @@ def rank_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def build_public_message(candidate: dict[str, Any]) -> str:
     symbol = candidate["symbol"]
-    name = candidate["name"]
     change_24h = candidate["change_24h"]
     current_price = candidate["current_price"]
     market_cap = candidate["market_cap"]
@@ -332,21 +333,26 @@ def build_public_message(candidate: dict[str, Any]) -> str:
         else "Not ranked"
     )
 
+    price_text = (
+        f" at **${current_price:,.2f}**"
+        if current_price is not None
+        else ""
+    )
+
     return "\n".join(
         [
             "# 🪙 Crypto Mover",
             "",
             f"## {symbol}",
             "",
-            f"**{name}**",
-            "",
             (
                 f"{move_icon} **24h move: "
-                f"{change_24h:+.2f}%** at **{format_price(current_price)}**"
+                f"{change_24h:+.2f}%**{price_text}"
             ),
             "",
             f"🏆 **Market cap rank:** {rank_text}",
             f"💰 **Market cap:** {format_compact_usd(market_cap)}",
+            "",
             f"📊 **24h volume:** {format_compact_usd(volume_24h)}",
             "",
             "*Market data — not a trade signal.*",
@@ -354,12 +360,24 @@ def build_public_message(candidate: dict[str, Any]) -> str:
     )
 
 
+def crypto_chart_symbol(symbol: str) -> str:
+    """Map a crypto ticker to the Yahoo Finance chart symbol."""
+    return f"{symbol.upper()}-USD"
+
+
 def build_webhook_payload(candidate: dict[str, Any]) -> dict[str, Any]:
-    return bordered_webhook_payload(
-        WEBHOOK_USERNAME,
-        build_public_message(candidate),
-        color=BRAND_NEON_PINK,
-    )
+    message = build_public_message(candidate)
+
+    return {
+        "username": WEBHOOK_USERNAME,
+        "embeds": [
+            bordered_embed(
+                message,
+                color=BRAND_NEON_PINK,
+            )
+        ],
+        "allowed_mentions": {"parse": []},
+    }
 
 
 def already_posted_today(
@@ -429,61 +447,105 @@ def discord_retry_seconds(
 
 def send_discord_message(
     webhook_url: str,
-    payload: dict[str, Any],
+    message: str,
+    username: str,
+    *,
+    chart_symbol: str | None = None,
 ) -> str | None:
-    encoded = json.dumps(payload).encode("utf-8")
-
-    for attempt in range(1, MAX_DISCORD_ATTEMPTS + 1):
-        request = urllib.request.Request(
-            webhook_url,
-            data=encoded,
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": USER_AGENT,
-            },
-            method="POST",
-        )
-
-        try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                if response.status not in (200, 204):
-                    raise RuntimeError(
-                        f"Discord returned HTTP {response.status}"
-                    )
-
-                if response.status != 200:
-                    return None
-
-                try:
-                    response_payload = json.loads(
-                        response.read().decode("utf-8")
-                    )
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    return None
-
-                if isinstance(response_payload, dict):
-                    message_id = response_payload.get("id")
-
-                    if message_id:
-                        return str(message_id)
-
-                return None
-
-        except urllib.error.HTTPError as exc:
-            if exc.code != 429 or attempt >= MAX_DISCORD_ATTEMPTS:
-                body = exc.read().decode("utf-8", errors="replace")
-                raise RuntimeError(
-                    f"Discord returned HTTP {exc.code}: {body}"
-                ) from exc
-
-            wait_seconds = discord_retry_seconds(exc, attempt)
-            print(
-                "Discord rate limit reached. "
-                f"Waiting {wait_seconds:.1f} seconds..."
+    payload_data = {
+        "username": username,
+        "embeds": [
+            bordered_embed(
+                message,
+                color=BRAND_NEON_PINK,
             )
-            time.sleep(wait_seconds)
+        ],
+        "allowed_mentions": {"parse": []},
+    }
+    chart_path: Path | None = None
 
-    raise RuntimeError("Discord post failed after retries.")
+    try:
+        if chart_symbol is None:
+            payload = json.dumps(payload_data).encode("utf-8")
+            content_type = "application/json"
+        else:
+            chart_path = temporary_weekly_chart_path(chart_symbol)
+            chart_path = generate_weekly_chart(
+                crypto_chart_symbol(chart_symbol),
+                output_path=chart_path,
+            )
+            attachment_name = weekly_chart_filename(chart_symbol)
+            payload_data["embeds"][0]["image"] = {
+                "url": f"attachment://{attachment_name}",
+            }
+            payload_data["attachments"] = [
+                {
+                    "id": 0,
+                    "filename": attachment_name,
+                    "description": f"{chart_symbol} weekly chart",
+                }
+            ]
+            payload, boundary = multipart_body(
+                payload=payload_data,
+                file_path=chart_path,
+                file_name=attachment_name,
+            )
+            content_type = f"multipart/form-data; boundary={boundary}"
+
+        for attempt in range(1, MAX_DISCORD_ATTEMPTS + 1):
+            request = urllib.request.Request(
+                webhook_url,
+                data=payload,
+                headers={
+                    "Content-Type": content_type,
+                    "User-Agent": USER_AGENT,
+                },
+                method="POST",
+            )
+
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    if response.status not in (200, 204):
+                        raise RuntimeError(
+                            f"Discord returned HTTP {response.status}"
+                        )
+
+                    if response.status != 200:
+                        return None
+
+                    try:
+                        response_payload = json.loads(
+                            response.read().decode("utf-8")
+                        )
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        return None
+
+                    if isinstance(response_payload, dict):
+                        message_id = response_payload.get("id")
+
+                        if message_id:
+                            return str(message_id)
+
+                    return None
+
+            except urllib.error.HTTPError as exc:
+                if exc.code != 429 or attempt >= MAX_DISCORD_ATTEMPTS:
+                    body = exc.read().decode("utf-8", errors="replace")
+                    raise RuntimeError(
+                        f"Discord returned HTTP {exc.code}: {body}"
+                    ) from exc
+
+                wait_seconds = discord_retry_seconds(exc, attempt)
+                print(
+                    "Discord rate limit reached. "
+                    f"Waiting {wait_seconds:.1f} seconds..."
+                )
+                time.sleep(wait_seconds)
+
+        raise RuntimeError("Discord post failed after retries.")
+    finally:
+        if chart_path is not None:
+            cleanup_weekly_chart(chart_path)
 
 
 def configure_stdout() -> None:
@@ -558,7 +620,7 @@ def main(argv: list[str] | None = None) -> None:
     arguments = parse_args(argv)
     date_label = eastern_today_label()
     universe_size = env_int("CRYPTO_MOVERS_UNIVERSE_SIZE", 100)
-    daily_max = min(env_int("CRYPTO_MOVERS_DAILY_MAX", 5), 5)
+    daily_max = min(env_int("CRYPTO_MOVERS_DAILY_MAX", 10), 10)
 
     coins = fetch_top_coins(universe_size)
     candidates = [calculate_candidate(coin) for coin in coins]
@@ -620,8 +682,12 @@ def main(argv: list[str] | None = None) -> None:
         ):
             continue
 
-        payload = build_webhook_payload(candidate)
-        message_id = send_discord_message(webhook_url, payload)
+        message_id = send_discord_message(
+            webhook_url,
+            build_public_message(candidate),
+            WEBHOOK_USERNAME,
+            chart_symbol=candidate["symbol"],
+        )
         state = mark_posted(
             state,
             date_label=date_label,

@@ -1,8 +1,8 @@
 [Unit]
-Description=Post Main Line Trades Crypto Movers Daily at 9:00 AM ET
+Description=Post Main Line Trades Crypto Movers Daily at 6:02 AM ET
 
 [Timer]
-OnCalendar=*-*-* 09:00:00 America/New_York
+OnCalendar=*-*-* 06:02:00 America/New_York
 Persistent=true
 Unit=mainline-crypto-movers.service
 

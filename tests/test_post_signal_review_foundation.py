@@ -276,23 +276,192 @@ class PostSignalReviewRecordTests(unittest.TestCase):
         self.assertIn('record["comparison_chart_verified"] = True', create)
         self.assertIn('"comparison_chart_verified": True', create)
 
-    def test_review_view_includes_edit_button(self):
+    def test_review_view_excludes_edit_button(self):
         source = Path(earnings_reactions.__file__).read_text(encoding="utf-8")
         view = source[
             source.index("    class PostSignalReviewView("):
             source.index("    async def resolve_original_signal_chart_url")
         ]
-        self.assertIn('custom_id="post_signal_review_edit"', view)
-        self.assertIn("async def edit_review(", view)
+        self.assertNotIn('custom_id="post_signal_review_edit"', view)
+        self.assertNotIn("async def edit_review(", view)
 
-    def test_edit_modal_updates_layout_view_not_embeds(self):
+    def test_publish_fetches_draft_message_before_reading_attachments(self):
         source = Path(earnings_reactions.__file__).read_text(encoding="utf-8")
-        modal = source[
-            source.index("    class PostSignalReviewEditModal("):
-            source.index("    class PostSignalReviewView(")
-        ]
-        self.assertIn("await interaction.response.edit_message(view=updated_view)", modal)
-        self.assertNotIn("embeds=[content_embed", modal)
+        publish = source[source.index("        async def publish("):source.index("        async def defer_review(")]
+        self.assertIn("await draft_channel.fetch_message(", publish)
+        self.assertIn("fetch_post_signal_review_chart_files(", publish)
+
+    def test_publish_resolves_components_v2_gallery_urls_when_attachments_missing(self):
+        container = {
+            "type": 17,
+            "components": [
+                {
+                    "type": 12,
+                    "items": [
+                        {
+                            "media": {
+                                "url": "https://cdn.discordapp.com/attachments/1/2/LNSR_original.png"
+                            }
+                        }
+                    ],
+                },
+                {
+                    "type": 12,
+                    "items": [
+                        {
+                            "media": {
+                                "url": "https://cdn.discordapp.com/attachments/1/3/LNSR_updated.png"
+                            }
+                        }
+                    ],
+                },
+            ],
+        }
+        message = type(
+            "Message",
+            (),
+            {
+                "attachments": [],
+                "to_dict": lambda self: {"components": [container]},
+            },
+        )()
+        urls = earnings_reactions.post_signal_review_gallery_media_urls(message)
+        self.assertEqual(
+            urls,
+            [
+                "https://cdn.discordapp.com/attachments/1/2/LNSR_original.png",
+                "https://cdn.discordapp.com/attachments/1/3/LNSR_updated.png",
+            ],
+        )
+
+    def test_publish_resolves_gallery_urls_from_rest_payload_dict(self):
+        payload = {
+            "components": [
+                {
+                    "type": 17,
+                    "components": [
+                        {
+                            "type": 12,
+                            "items": [
+                                {
+                                    "media": {
+                                        "url": "https://cdn.discordapp.com/attachments/1/2/OXBR_original.png"
+                                    }
+                                }
+                            ],
+                        },
+                        {
+                            "type": 12,
+                            "items": [
+                                {
+                                    "media": {
+                                        "url": "https://cdn.discordapp.com/attachments/1/3/OXBR_updated.png"
+                                    }
+                                }
+                            ],
+                        },
+                    ],
+                }
+            ]
+        }
+        urls = earnings_reactions.post_signal_review_gallery_media_urls(payload)
+        self.assertEqual(
+            urls,
+            [
+                "https://cdn.discordapp.com/attachments/1/2/OXBR_original.png",
+                "https://cdn.discordapp.com/attachments/1/3/OXBR_updated.png",
+            ],
+        )
+
+    def test_publish_resolves_gallery_urls_from_message_component_objects(self):
+        class Media:
+            def __init__(self, url: str) -> None:
+                self.url = url
+
+        class Item:
+            def __init__(self, url: str) -> None:
+                self.media = Media(url)
+
+        class Gallery:
+            def __init__(self, url: str) -> None:
+                self.items = [Item(url)]
+
+        class Container:
+            def __init__(self) -> None:
+                self.children = [
+                    Gallery("https://cdn.discordapp.com/attachments/1/2/original.png"),
+                    Gallery("https://cdn.discordapp.com/attachments/1/3/updated.png"),
+                ]
+
+        message = type(
+            "Message",
+            (),
+            {
+                "attachments": [],
+                "components": [Container()],
+            },
+        )()
+        urls = earnings_reactions.post_signal_review_gallery_media_urls(message)
+        self.assertEqual(
+            urls,
+            [
+                "https://cdn.discordapp.com/attachments/1/2/original.png",
+                "https://cdn.discordapp.com/attachments/1/3/updated.png",
+            ],
+        )
+
+    def test_fetch_post_signal_review_chart_files_downloads_gallery_urls(self):
+        record = PostSignalReviewRecordTests().build_record(symbol="LNSR")
+        container = {
+            "type": 17,
+            "components": [
+                {
+                    "type": 12,
+                    "items": [
+                        {"media": {"url": "https://cdn.discordapp.com/attachments/1/2/original.png"}}
+                    ],
+                },
+                {
+                    "type": 12,
+                    "items": [
+                        {"media": {"url": "https://cdn.discordapp.com/attachments/1/3/updated.png"}}
+                    ],
+                },
+            ],
+        }
+        message = type(
+            "Message",
+            (),
+            {
+                "attachments": [],
+                "to_dict": lambda self: {"components": [container]},
+            },
+        )()
+
+        class FakeFile:
+            def __init__(self, fp, filename):
+                self.fp = fp
+                self.filename = filename
+
+        fake_discord = type("discord", (), {"File": FakeFile})()
+
+        with patch.object(
+            earnings_reactions,
+            "download_manual_chart_bytes",
+            side_effect=[b"original-bytes", b"updated-bytes"],
+        ):
+            original_file, updated_file = asyncio.run(
+                earnings_reactions.fetch_post_signal_review_chart_files(
+                    message,
+                    record,
+                    fake_discord,
+                )
+            )
+
+        self.assertEqual(original_file.filename, "LNSR_original.png")
+        self.assertEqual(updated_file.filename, "LNSR_updated.png")
+        self.assertEqual(original_file.fp.getvalue(), b"original-bytes")
+        self.assertEqual(updated_file.fp.getvalue(), b"updated-bytes")
 
     def test_defer_and_dismiss_complete_response_then_use_bounded_delete(self):
         source = Path(earnings_reactions.__file__).read_text(encoding="utf-8")
@@ -311,7 +480,7 @@ class PostSignalReviewRecordTests(unittest.TestCase):
         source = Path(earnings_reactions.__file__).read_text(encoding="utf-8")
         cleanup = source[
             source.index("    def schedule_review_draft_cleanup("):
-            source.index("    class PostSignalReviewEditModal")
+            source.index("    class PostSignalReviewView")
         ]
         self.assertIn("await asyncio.sleep(1)", cleanup)
         self.assertIn("await client.http.delete_message", cleanup)

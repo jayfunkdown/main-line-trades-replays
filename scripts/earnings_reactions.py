@@ -3829,6 +3829,126 @@ def manual_chart_embed_url(message: Any, metadata: Any) -> str | None:
     return None
 
 
+DISCORD_COMPONENT_TYPE_MEDIA_GALLERY = 12
+
+
+def gallery_media_urls_from_component_payload(component: Any) -> list[str]:
+    """Collect MediaGallery CDN URLs from one Components V2 payload node."""
+    if not isinstance(component, dict):
+        return []
+    urls: list[str] = []
+    if component.get("type") == DISCORD_COMPONENT_TYPE_MEDIA_GALLERY:
+        for item in component.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            media = item.get("media")
+            if not isinstance(media, dict):
+                continue
+            url = media.get("url")
+            if isinstance(url, str) and url:
+                urls.append(url)
+    child_components = component.get("components") or component.get("children") or []
+    for child in child_components:
+        urls.extend(gallery_media_urls_from_component_payload(child))
+    return urls
+
+
+def gallery_media_urls_from_component_object(component: Any) -> list[str]:
+    """Collect MediaGallery URLs from a discord.py Component object tree."""
+    urls: list[str] = []
+    items = getattr(component, "items", None)
+    if items is not None:
+        for item in items:
+            media = getattr(item, "media", None)
+            url = getattr(media, "url", None)
+            if isinstance(url, str) and url:
+                urls.append(url)
+    child_components = getattr(component, "children", None)
+    if child_components is None:
+        child_components = getattr(component, "components", None)
+    for child in child_components or []:
+        urls.extend(gallery_media_urls_from_component_object(child))
+    return urls
+
+
+def post_signal_review_gallery_media_urls(message: Any) -> list[str]:
+    """Return chart media URLs from a Components V2 post-signal review draft."""
+    if isinstance(message, dict):
+        payload = message
+    else:
+        components = getattr(message, "components", None)
+        if components is not None:
+            urls: list[str] = []
+            for component in components:
+                urls.extend(gallery_media_urls_from_component_object(component))
+            return urls
+        payload = message.to_dict() if hasattr(message, "to_dict") else {}
+    if not isinstance(payload, dict):
+        return []
+    urls = []
+    for component in payload.get("components") or []:
+        urls.extend(gallery_media_urls_from_component_payload(component))
+    return urls
+
+
+def is_trusted_discord_cdn_url(url: str) -> bool:
+    parsed = urllib.parse.urlparse(url)
+    return (
+        parsed.scheme == "https"
+        and parsed.hostname in MANUAL_SIGNAL_DISCORD_CDN_HOSTS
+        and parsed.username is None
+        and parsed.password is None
+        and parsed.port is None
+        and parsed.path.startswith("/attachments/")
+    )
+
+
+async def fetch_post_signal_review_chart_files(
+    message: Any,
+    record: dict[str, Any],
+    discord_module: Any,
+) -> tuple[Any, Any]:
+    """Resolve the two review chart files from a draft message."""
+    original_filename, updated_filename = post_signal_review_chart_filenames(record)
+    attachments = list(getattr(message, "attachments", []) or [])
+
+    async def attachment_to_file(attachment: Any, filename: str) -> Any:
+        return await asyncio.wait_for(
+            attachment.to_file(filename=filename, use_cached=True),
+            timeout=20,
+        )
+
+    if len(attachments) == 2:
+        return await asyncio.gather(
+            attachment_to_file(attachments[0], original_filename),
+            attachment_to_file(attachments[1], updated_filename),
+        )
+
+    gallery_urls = post_signal_review_gallery_media_urls(message)
+    if len(gallery_urls) != 2:
+        raise DefiniteDeliveryError("review charts unavailable")
+
+    async def gallery_url_to_file(url: str, filename: str) -> Any:
+        if url.startswith("attachment://"):
+            attachment_name = Path(url.removeprefix("attachment://")).name
+            for attachment in attachments:
+                if Path(getattr(attachment, "filename", "")).name == attachment_name:
+                    return await attachment_to_file(attachment, filename)
+            raise DefiniteDeliveryError("review charts unavailable")
+        if not is_trusted_discord_cdn_url(url):
+            raise DefiniteDeliveryError("review charts unavailable")
+        chart_bytes = await asyncio.to_thread(download_manual_chart_bytes, url)
+        return discord_module.File(io.BytesIO(chart_bytes), filename=filename)
+
+    try:
+        return await asyncio.gather(
+            gallery_url_to_file(gallery_urls[0], original_filename),
+            gallery_url_to_file(gallery_urls[1], updated_filename),
+        )
+    except asyncio.TimeoutError as exc:
+        raise DefiniteDeliveryError("review chart retrieval timed out") from exc
+
+
 def download_manual_chart_bytes(url: str) -> bytes:
     request = urllib.request.Request(
         url,
@@ -4993,164 +5113,6 @@ async def run_review_button_bot() -> None:
         review_cleanup_tasks.add(task)
         task.add_done_callback(review_cleanup_tasks.discard)
 
-    class PostSignalReviewEditModal(
-        discord.ui.Modal,
-        title="Edit Signal Review",
-    ):
-        outcome = discord.ui.TextInput(
-            label="Outcome",
-            placeholder="still_active, worked, invalidated, or no_clear_follow_through",
-            required=True,
-            max_length=40,
-        )
-        summary = discord.ui.TextInput(
-            label="Review summary",
-            style=discord.TextStyle.paragraph,
-            required=True,
-            max_length=1200,
-        )
-        chart_verified = discord.ui.TextInput(
-            label="Updated chart verified?",
-            placeholder="Type YES only after checking levels and line anchors",
-            required=True,
-            max_length=3,
-        )
-        comparison_chart = discord.ui.FileUpload(
-            custom_id="post_signal_review_comparison_chart",
-            required=False,
-            min_values=0,
-            max_values=1,
-        )
-
-        def __init__(self, review_id: str, draft_message_id: str, record: dict[str, Any]):
-            super().__init__()
-            self.review_id = review_id
-            self.draft_message_id = draft_message_id
-            self.symbol = str(record.get("symbol") or "Signal")
-            self.outcome.default = str(record.get("proposed_outcome") or "still_active")
-            self.summary.default = str(record.get("review_summary") or "")
-            self.chart_verified.default = (
-                "YES" if record.get("comparison_chart_verified") else "NO"
-            )
-            self.add_item(
-                discord.ui.Label(
-                    text="Corrected comparison chart (optional)",
-                    description=(
-                        "Upload PNG, JPG, JPEG, or WEBP; blank keeps the current chart."
-                    ),
-                    component=self.comparison_chart,
-                )
-            )
-
-        async def on_submit(self, interaction: Any) -> None:
-            if not can_clear_earnings_review(interaction.user, interaction.guild):
-                await send_ephemeral_rejection(interaction, "You cannot edit this review.")
-                return
-            uploads = list(self.comparison_chart.values)
-            if uploads and (
-                len(uploads) != 1
-                or not is_valid_manual_chart_attachment(uploads[0])
-            ):
-                await send_ephemeral_rejection(
-                    interaction,
-                    "Upload one PNG, JPG, JPEG, or WEBP comparison chart.",
-                )
-                return
-            replacement_file = None
-            replacement_filename = None
-            requested_chart_verification = (
-                str(self.chart_verified).strip().upper() == "YES"
-            )
-            if uploads:
-                suffix = Path(uploads[0].filename).suffix.lower()
-                replacement_filename = f"{self.symbol}_review{suffix}"
-                try:
-                    replacement_file = await uploads[0].to_file(
-                        filename=replacement_filename
-                    )
-                except Exception:
-                    await send_ephemeral_rejection(
-                        interaction,
-                        "The corrected chart could not be prepared; no review changes were saved.",
-                    )
-                    return
-            try:
-                latest, outcome = edit_post_signal_review(
-                    self.review_id,
-                    self.draft_message_id,
-                    datetime.now(EASTERN).isoformat(),
-                    outcome=str(self.outcome),
-                    summary=str(self.summary),
-                    # A replacement chart is not publishable until Discord has
-                    # accepted that exact attachment below.
-                    comparison_chart_verified=(
-                        requested_chart_verification
-                        and replacement_file is None
-                    ),
-                )
-            except EarningsStateError:
-                outcome = "invalid"
-                latest = {}
-            if outcome != "updated":
-                await send_ephemeral_rejection(interaction, "This review could not be updated.")
-                return
-            record = latest["post_signal_reviews"][self.review_id]
-            now = datetime.now(EASTERN)
-            original_filename, updated_filename = post_signal_review_chart_filenames(
-                record
-            )
-            updated_view = PostSignalReviewView(
-                build_post_signal_review_message(record, now, private=True),
-                original_filename,
-                updated_filename,
-            )
-            if replacement_file is None:
-                await interaction.response.edit_message(view=updated_view)
-                return
-            draft_message = getattr(interaction, "message", None)
-            attachments = list(
-                getattr(draft_message, "attachments", []) or []
-            )
-            if not attachments:
-                await send_ephemeral_rejection(
-                    interaction,
-                    "The draft charts are unavailable. Please try again.",
-                )
-                return
-            try:
-                original_file = await attachments[0].to_file(
-                    filename=original_filename,
-                    use_cached=True,
-                )
-            except Exception:
-                await send_ephemeral_rejection(
-                    interaction,
-                    "The original chart could not be retained. No review changes were saved.",
-                )
-                return
-            record["comparison_chart_verified"] = requested_chart_verification
-            await interaction.response.edit_message(
-                view=updated_view,
-                attachments=[original_file, replacement_file],
-            )
-            try:
-                _, persisted_outcome = edit_post_signal_review(
-                    self.review_id,
-                    self.draft_message_id,
-                    now.isoformat(),
-                    outcome=str(self.outcome),
-                    summary=str(self.summary),
-                    comparison_chart_verified=requested_chart_verification,
-                )
-            except EarningsStateError:
-                persisted_outcome = "invalid"
-            if persisted_outcome != "updated":
-                await send_ephemeral_rejection(
-                    interaction,
-                    "The corrected chart was attached, but verification was not saved. "
-                    "Publishing remains blocked; please edit the review again.",
-                )
-
     class PostSignalReviewView(discord.ui.LayoutView):
         def __init__(
             self,
@@ -5168,15 +5130,6 @@ async def run_review_button_bot() -> None:
                 await self.publish(interaction, publish_button)
 
             publish_button.callback = publish_callback
-            edit_button = discord.ui.Button(
-                label="Edit",
-                style=discord.ButtonStyle.primary,
-                custom_id="post_signal_review_edit",
-            )
-            async def edit_callback(interaction: Any) -> None:
-                await self.edit_review(interaction, edit_button)
-
-            edit_button.callback = edit_callback
             defer_button = discord.ui.Button(
                 label="Review in 1 Month",
                 style=discord.ButtonStyle.secondary,
@@ -5197,7 +5150,6 @@ async def run_review_button_bot() -> None:
             dismiss_button.callback = dismiss_callback
             action_buttons = [
                 publish_button,
-                edit_button,
                 defer_button,
                 dismiss_button,
             ]
@@ -5275,7 +5227,7 @@ async def run_review_button_bot() -> None:
                 if outcome == "verification_required":
                     await send_ephemeral_rejection(
                         interaction,
-                        "Verify the updated chart in Edit before publishing.",
+                        "This review is not ready to publish yet.",
                     )
                     return
                 if outcome != "claimed":
@@ -5285,32 +5237,27 @@ async def run_review_button_bot() -> None:
                     public_channel = client.get_channel(signal_reviews_channel_id)
                     if public_channel is None:
                         public_channel = await client.fetch_channel(signal_reviews_channel_id)
-                    attachments = list(getattr(draft_message, "attachments", []) or [])
-                    if len(attachments) != 2:
-                        raise DefiniteDeliveryError("review charts unavailable")
-                    original_filename = f"{record['symbol']}_original.png"
-                    updated_filename = f"{record['symbol']}_updated.png"
-                    try:
-                        original_file, updated_file = await asyncio.gather(
-                            asyncio.wait_for(
-                                attachments[0].to_file(
-                                    filename=original_filename,
-                                    use_cached=True,
-                                ),
-                                timeout=20,
-                            ),
-                            asyncio.wait_for(
-                                attachments[1].to_file(
-                                    filename=updated_filename,
-                                    use_cached=True,
-                                ),
-                                timeout=20,
-                            ),
+                    draft_channel = interaction.channel
+                    if draft_channel is None:
+                        draft_channel = await client.fetch_channel(
+                            interaction.channel_id
                         )
-                    except asyncio.TimeoutError as exc:
-                        raise DefiniteDeliveryError(
-                            "review chart retrieval timed out"
-                        ) from exc
+                    draft_message_id = getattr(draft_message, "id", None)
+                    if draft_message_id is None:
+                        raise DefiniteDeliveryError("review draft unavailable")
+                    fetched_draft = await draft_channel.fetch_message(
+                        int(draft_message_id)
+                    )
+                    original_filename, updated_filename = (
+                        post_signal_review_chart_filenames(record)
+                    )
+                    original_file, updated_file = (
+                        await fetch_post_signal_review_chart_files(
+                            fetched_draft,
+                            record,
+                            discord,
+                        )
+                    )
                     public_layout = build_post_signal_review_layout(
                         discord,
                         build_post_signal_review_message(
@@ -5380,16 +5327,6 @@ async def run_review_button_bot() -> None:
                     interaction,
                     "Review published.",
                 )
-
-        async def edit_review(self, interaction: Any, button: Any) -> None:
-            resolved = await self.resolve(interaction)
-            if resolved is None:
-                await send_ephemeral_rejection(interaction, "This review is unavailable.")
-                return
-            review_id, record, message = resolved
-            await interaction.response.send_modal(
-                PostSignalReviewEditModal(review_id, str(message.id), record)
-            )
 
         async def defer_review(self, interaction: Any, button: Any) -> None:
             resolved = await self.resolve(interaction)

@@ -379,7 +379,7 @@ class SelectionAndLimitTests(NoNetworkTestCase):
             (["S0", "S1", "S2"], ["S0", "S1"]),
         )
 
-    def test_public_cap_prioritizes_starred_names_within_fifteen_total(self):
+    def test_public_cap_prioritizes_starred_names_within_ten_total(self):
         candidates = [
             self.candidate(
                 "STARRED",
@@ -407,9 +407,9 @@ class SelectionAndLimitTests(NoNetworkTestCase):
         private_symbols, public_symbols = self.preview_symbols(result)
 
         self.assertNotIn("STARRED", private_symbols)
-        self.assertEqual(len(public_symbols), 15)
+        self.assertEqual(len(public_symbols), 10)
         self.assertEqual(public_symbols[0], "STARRED")
-        self.assertNotIn("MOVE14", public_symbols)
+        self.assertNotIn("MOVE9", public_symbols)
 
     def test_public_feed_is_selected_before_private_feed_is_capped(self):
         candidates = [
