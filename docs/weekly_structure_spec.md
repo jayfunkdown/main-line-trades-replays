@@ -23,9 +23,15 @@ Comparing this week’s close to the prior week’s wick high/low is the wrong
 method. That is a different pattern and will fire on noise (tiny crypto
 breaks, etc.).
 
-The weekly is a **containment** from a swing extreme back to the **start of
-the weekly move that made that extreme** — that candle’s **open**, on the
-body, never the wick.
+The weekly is a **containment** from a swing extreme back to the
+**weekly swing that made the move to that extreme**. That is a swing,
+not merely the last candle at the high or low. When the swing is one
+week (IMXI 13.06, SAFT 73.77), the line is that week’s **open**. When
+the swing is several weeks (EW from ~85 into 96), the line is the
+**origin of that swing**, never a later candle sitting near the
+extreme (EW 92.21, BBY 86.49, SAFT 103).
+
+Never the wick. Never last week’s high or low.
 
 ---
 
@@ -48,13 +54,13 @@ the top of that drop.
    had kept falling from the X area into a new low (~8.30), the weekly
    would be that new-low week’s **body**, not the X. It did not, so
    **12.21 stays**.
-6. The weekly line is the **open of the impulse week that printed that
-   low** — the start of the weekly move that made the low. On IMXI that
-   is 13.06. A bounce before the low (IMXI 14.54) is not the weekly.
-7. Draw on that candle’s **body**, using the **open**. **Never the wick.**
+6. The weekly line is the **origin of the swing that printed that low**.
+   If that swing is a single week, use that week’s **open** (IMXI 13.06).
+   A bounce in the middle of the drop (IMXI 14.54) is not the weekly.
+7. Draw on the body, **open of the origin week**. **Never the wick.**
    Never the close of a later week that is only sitting on the extreme.
 8. **Gained the weekly** = a later weekly candle **closes through** that
-   open (close strictly above it).
+   origin (close strictly above it).
 
 ### Trained gain examples
 
@@ -81,17 +87,18 @@ the same thing.
 2. That high must be a **new high**. If a later bounce does not make a
    new high, do **not** move the weekly.
 3. If it **does** make a **new** high with a real later move, re-anchor
-   to that later impulse week’s **open**. Tiny weeks that only nick a
+   to the **origin of that later swing**. Tiny weeks that only nick a
    new high while sitting there do **not** move the weekly.
-4. The impulse week is the **large week that made the extreme**, not a
-   later tiny week that only nicks a new high (SAFT sitting at 103,
-   NWG sitting at 19.19).
-5. Draw on that impulse week’s **open**. Never the wick. Never the
-   **close of a dump** (VTRS 16.43, DBD 73.59). SAFT’s weekly is ~73.77
-   (open of the spike), not 103.
+4. The weekly is the **swing that made the high**, not a later tiny
+   week that only nicks a new high (SAFT sitting at 103, NWG 19.19,
+   BBY 86.49).
+5. If one week *is* the swing, draw on that week’s **open** (SAFT
+   ~73.77). If the last week only finished a multi-week swing, draw on
+   the **origin of that swing** (EW ~85, not 92.21). Never the wick.
+   Never the **close of a dump** (VTRS 16.43, DBD 73.59).
 6. **Lost the weekly** = a later weekly candle **closes through** that
-   open to the downside (close strictly below it). If price is still
-   sitting on the high, the weekly has not been lost.
+   origin to the downside. If price is still sitting on the high, the
+   weekly has not been lost.
 
 Most names that qualify will be gained / Long. Sometimes it is lost /
 Short. Both are valid.

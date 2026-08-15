@@ -178,6 +178,30 @@ class WeeklyScreenerClassifierTests(unittest.TestCase):
         self.assertAlmostEqual(result["level"], 13.06, places=2)
         self.assertNotAlmostEqual(result["level"], 14.54, places=2)
 
+    def test_multi_week_swing_uses_the_origin_not_the_last_candle(self):
+        """EW: rally from ~85 into ~96. Line is the swing origin, not 94."""
+        weekly = make_weekly(
+            [
+                ("2026-04-10T20:00:00+00:00", 80.0, 82.0, 79.0, 81.0),
+                ("2026-04-17T20:00:00+00:00", 81.0, 83.0, 80.0, 82.0),
+                ("2026-04-24T20:00:00+00:00", 82.0, 84.0, 81.0, 83.0),
+                ("2026-05-01T20:00:00+00:00", 83.0, 85.0, 82.0, 84.0),
+                ("2026-05-08T20:00:00+00:00", 84.0, 86.0, 83.0, 85.0),
+                ("2026-05-15T20:00:00+00:00", 85.99, 87.93, 83.17, 85.11),
+                ("2026-05-22T20:00:00+00:00", 85.30, 89.60, 84.61, 87.36),
+                ("2026-05-29T20:00:00+00:00", 87.34, 92.46, 85.32, 90.78),
+                ("2026-06-05T20:00:00+00:00", 91.02, 94.47, 89.69, 94.37),
+                ("2026-06-12T20:00:00+00:00", 94.36, 96.29, 90.69, 92.21),
+                ("2026-06-19T20:00:00+00:00", 92.28, 93.09, 85.30, 85.73),
+                ("2026-06-26T20:00:00+00:00", 85.97, 89.08, 82.53, 82.63),
+            ]
+        )
+        result = weekly_screener.classify_weekly_structure(weekly)
+        self.assertEqual(result["side"], "loss")
+        self.assertAlmostEqual(result["level"], 85.30, places=2)
+        self.assertNotAlmostEqual(result["level"], 94.36, places=2)
+        self.assertNotAlmostEqual(result["level"], 92.21, places=2)
+
     def test_scan_save_cannot_drop_posted_names(self):
         disk = weekly_screener.empty_state()
         disk["seeded"] = True
@@ -276,8 +300,10 @@ class WeeklyScreenerClassifierTests(unittest.TestCase):
         )
         result = weekly_screener.classify_weekly_structure(weekly)
         self.assertNotAlmostEqual(float(result.get("level") or 0), 16.43, places=2)
+        self.assertNotAlmostEqual(float(result.get("level") or 0), 17.74, places=2)
         if result["side"] == "loss":
-            self.assertAlmostEqual(result["level"], 17.74, places=2)
+            self.assertGreaterEqual(result["level"], 17.20)
+            self.assertLessEqual(result["level"], 17.50)
             self.assertFalse(
                 weekly_screener.is_retest(result["close"], result["level"], proximity=0.01)
             )

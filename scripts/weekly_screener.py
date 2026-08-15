@@ -705,6 +705,53 @@ def candle_true_range(candle: dict[str, Any]) -> float:
     return abs(float(candle["high"]) - float(candle["low"]))
 
 
+def close_location(candle: dict[str, Any]) -> float:
+    high = float(candle["high"])
+    low = float(candle["low"])
+    span = high - low
+    if span <= 0:
+        return 0.5
+    return (float(candle["close"]) - low) / span
+
+
+def week_made_extreme(candle: dict[str, Any], *, kind: str) -> bool:
+    """A dump that only tags a high, or a rally that only tags a low, is not the impulse."""
+    close = float(candle["close"])
+    open_ = float(candle["open"])
+    location = close_location(candle)
+    if kind == "high":
+        return close >= open_ or location >= 0.5
+    return close <= open_ or location <= 0.5
+
+
+def _impulse_in_cluster(
+    weekly: list[dict[str, Any]],
+    *,
+    end: int,
+    kind: str,
+    in_cluster,
+) -> int | None:
+    confirmed: list[tuple[float, int]] = []
+    fallback: list[tuple[float, int]] = []
+    for index in range(3, end):
+        if not in_cluster(index):
+            continue
+        span = candle_true_range(weekly[index])
+        fallback.append((span, index))
+        if week_made_extreme(weekly[index], kind=kind):
+            confirmed.append((span, index))
+    pool = confirmed or fallback
+    if not pool:
+        return None
+    chosen = max(pool, key=lambda item: (item[0], item[1]))[1]
+    if week_made_extreme(weekly[chosen], kind=kind):
+        return chosen
+    for index in range(chosen - 1, 2, -1):
+        if week_made_extreme(weekly[index], kind=kind):
+            return index
+    return chosen
+
+
 def swing_low_index(weekly: list[dict[str, Any]], *, right_pad: int = 1) -> int | None:
     """Impulse week that printed the swing low, not a later nibble at the same low."""
     if len(weekly) < 8:
@@ -723,23 +770,73 @@ def swing_low_index(weekly: list[dict[str, Any]], *, right_pad: int = 1) -> int 
     if best is None or best_low is None:
         return None
     band = abs(best_low) * (1.0 + EXTREME_CLUSTER_PCT)
-    impulse = best
-    impulse_range = candle_true_range(weekly[best])
-    for index in range(3, end):
-        if float(weekly[index]["low"]) > band:
-            continue
-        span = candle_true_range(weekly[index])
-        if span > impulse_range:
-            impulse = index
-            impulse_range = span
-    return impulse
+    return _impulse_in_cluster(
+        weekly,
+        end=end,
+        kind="low",
+        in_cluster=lambda index: float(weekly[index]["low"]) <= band,
+    )
+
+
+SWING_FRACTION = 0.5
+
+
+def last_pause_before(
+    weekly: list[dict[str, Any]],
+    extreme_index: int,
+    *,
+    kind: str,
+) -> int | None:
+    """Most recent counter-trend week before the extreme. That is the local base."""
+    for index in range(extreme_index - 1, 1, -1):
+        close = float(weekly[index]["close"])
+        open_ = float(weekly[index]["open"])
+        if kind == "high" and close < open_:
+            return index
+        if kind == "low" and close > open_:
+            return index
+    return None
+
+
+def origin_of_swing(
+    weekly: list[dict[str, Any]],
+    extreme_index: int,
+    *,
+    kind: str,
+) -> int | None:
+    """
+    Origin of the weekly swing that made this extreme.
+
+    One-week swing (IMXI, SAFT): the impulse week's open.
+    Multi-week swing (EW): the first week of that run, not a later candle
+    sitting at the high or low.
+    """
+    if extreme_index < 0 or extreme_index >= len(weekly):
+        return None
+    pause = last_pause_before(weekly, extreme_index, kind=kind)
+    first_run = extreme_index if pause is None else min(pause + 1, extreme_index)
+    start = pause if pause is not None else first_run
+    if kind == "high":
+        extreme_price = float(weekly[extreme_index]["high"])
+        base = min(float(weekly[index]["low"]) for index in range(start, extreme_index + 1))
+        move = abs(extreme_price - base)
+    else:
+        extreme_price = float(weekly[extreme_index]["low"])
+        base = max(float(weekly[index]["high"]) for index in range(start, extreme_index + 1))
+        move = abs(base - extreme_price)
+    if move <= 0:
+        return extreme_index
+    if candle_true_range(weekly[extreme_index]) / move >= SWING_FRACTION:
+        return extreme_index
+    return first_run
 
 
 def origin_of_swing_low(weekly: list[dict[str, Any]], low_index: int) -> int | None:
-    """Impulse week that made this low. Line goes on that week's open."""
-    if low_index < 0 or low_index >= len(weekly):
-        return None
-    return low_index
+    return origin_of_swing(weekly, low_index, kind="low")
+
+
+def origin_of_swing_high(weekly: list[dict[str, Any]], high_index: int) -> int | None:
+    return origin_of_swing(weekly, high_index, kind="high")
 
 
 def swing_high_index(weekly: list[dict[str, Any]], *, right_pad: int = 1) -> int | None:
@@ -760,23 +857,12 @@ def swing_high_index(weekly: list[dict[str, Any]], *, right_pad: int = 1) -> int
     if best is None or best_high is None:
         return None
     band = abs(best_high) * (1.0 - EXTREME_CLUSTER_PCT)
-    impulse = best
-    impulse_range = candle_true_range(weekly[best])
-    for index in range(3, end):
-        if float(weekly[index]["high"]) < band:
-            continue
-        span = candle_true_range(weekly[index])
-        if span > impulse_range:
-            impulse = index
-            impulse_range = span
-    return impulse
-
-
-def origin_of_swing_high(weekly: list[dict[str, Any]], high_index: int) -> int | None:
-    """Impulse week that made this high. Line goes on that week's open."""
-    if high_index < 0 or high_index >= len(weekly):
-        return None
-    return high_index
+    return _impulse_in_cluster(
+        weekly,
+        end=end,
+        kind="high",
+        in_cluster=lambda index: float(weekly[index]["high"]) >= band,
+    )
 
 
 def origin_level(candle: dict[str, Any]) -> float:
