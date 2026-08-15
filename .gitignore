@@ -8,3 +8,4 @@ __pycache__/
 data/earnings_reactions_state.lock
 data/training_posted_ids.json
 data/video_intel_posted_ids.json
+data/crypto_movers_state.json

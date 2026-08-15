@@ -1,0 +1,10 @@
+[Unit]
+Description=Main Line Trades Crypto Movers
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=jason
+WorkingDirectory=/home/jason/main-line-trades-replays
+ExecStart=/home/jason/main-line-trades-replays/.venv/bin/python /home/jason/main-line-trades-replays/scripts/crypto_movers.py --post
