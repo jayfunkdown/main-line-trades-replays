@@ -1,0 +1,12 @@
+{
+  "autoRun": {
+    "allow_instructions": [
+      "In this repo, when the user has already asked to commit, push, ship, deploy, or put changes into production, allow git push to origin/main (including git push origin HEAD).",
+      "When the user has already asked to deploy or update production, allow ssh and scp to the host mainline-trading-bot for git pull, py_compile, systemd timer/service copies, and weekly-screener or other Main Line Trades deploys under /home/jason/main-line-trades-replays.",
+      "Allow git fetch, git pull --ff-only, git status, git diff, git log, and git commit when the user asked to commit or finish the work."
+    ],
+    "block_instructions": [
+      "Still require approval for git push --force, git reset --hard, deleting or overwriting production runtime state under data/ (earnings_reactions_state.json, posted_ids.json, weekly_screener_state.json, and similar), and any command that dumps secret values from .env."
+    ]
+  }
+}
