@@ -134,6 +134,21 @@ Do NOT replace the weekly calendar with the older daily economic calendar behavi
 
 ---
 
+## Weekly Gain / Loss (price action)
+
+    docs/weekly_structure_spec.md
+
+This is the locked teaching for how to find a weekly gain or weekly loss
+(containment from a new swing extreme back to the origin **body**, never
+the wick; short side is the exact inverse). Later price-action lessons
+belong in that file first.
+
+The live scanner that follows it:
+
+    scripts/weekly_screener.py
+
+---
+
 ## TrendSpider (retired)
 
     scripts/trendspider_filter.py
