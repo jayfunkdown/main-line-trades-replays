@@ -1486,6 +1486,10 @@ def infer_tradingview_horizon_date(
     return None
 
 
+TRADINGVIEW_SOLID_LINE_MIN_RUN = 50
+TRADINGVIEW_DOTTED_LINE_MAX_RUN = 35
+
+
 def tradingview_plot_bounds(width: int, height: int) -> tuple[int, int, int, int]:
     return (
         int(width * 0.028),
@@ -1504,7 +1508,21 @@ def is_tradingview_orange_pixel(red: int, green: int, blue: int) -> bool:
     )
 
 
-def tradingview_row_longest_orange_run(
+def is_tradingview_user_line_pixel(red: int, green: int, blue: int) -> bool:
+    if is_tradingview_orange_pixel(red, green, blue):
+        return True
+    if max(red, green, blue) < 120:
+        return False
+    if (
+        abs(red - green) < 18
+        and abs(green - blue) < 18
+        and max(red, green, blue) < 210
+    ):
+        return False
+    return max(red, green, blue) - min(red, green, blue) >= 40
+
+
+def tradingview_row_longest_run(
     xs: list[int],
 ) -> tuple[int, int, int]:
     ordered = sorted(set(xs))
@@ -1539,10 +1557,146 @@ def tradingview_row_longest_orange_run(
     return best_start, best_end, best_length
 
 
+def is_tradingview_dotted_horizontal_line(
+    xs: list[int],
+    plot_width: int,
+) -> bool:
+    if not xs:
+        return True
+
+    span = max(xs) - min(xs)
+    _run_start, _run_end, longest_run = tradingview_row_longest_run(xs)
+    if span >= plot_width * 0.6 and longest_run <= TRADINGVIEW_DOTTED_LINE_MAX_RUN:
+        return True
+    if span >= plot_width * 0.85 and longest_run <= TRADINGVIEW_SOLID_LINE_MIN_RUN:
+        return True
+    return False
+
+
+def tradingview_price_axis_points(image: Any) -> list[tuple[float, int]]:
+    from PIL import Image, ImageOps
+
+    try:
+        import pytesseract
+    except ImportError:
+        return []
+
+    width, height = image.size
+    axis = image.crop(
+        (
+            int(width * 0.88),
+            int(height * 0.08),
+            width,
+            int(height * 0.82),
+        )
+    )
+    prepared = ImageOps.autocontrast(axis.convert("L")).resize(
+        (axis.size[0] * 2, axis.size[1] * 2),
+        Image.Resampling.LANCZOS,
+    )
+    try:
+        data = pytesseract.image_to_data(
+            prepared,
+            output_type=pytesseract.Output.DICT,
+            config="--psm 6",
+        )
+    except pytesseract.TesseractNotFoundError:
+        return []
+    y_offset = int(height * 0.08)
+    points: list[tuple[float, int]] = []
+    for index, text in enumerate(data.get("text", [])):
+        cleaned = str(text or "").strip().replace(",", "")
+        if not cleaned:
+            continue
+        try:
+            price = float(cleaned)
+        except ValueError:
+            continue
+        if price <= 0 or price > 100_000:
+            continue
+        points.append((price, y_offset + int(data["top"][index]) // 2))
+    return sorted(points, key=lambda item: item[1])
+
+
+def estimate_tradingview_price_at_y(
+    image: Any,
+    y: int,
+) -> float | None:
+    points = tradingview_price_axis_points(image)
+    if len(points) < 2:
+        return None
+
+    if y <= points[0][1]:
+        return points[0][0]
+    if y >= points[-1][1]:
+        return points[-1][0]
+
+    for (price_top, y_top), (price_bottom, y_bottom) in zip(points, points[1:]):
+        if y_top <= y <= y_bottom:
+            ratio = (y - y_top) / max(y_bottom - y_top, 1)
+            return price_top + ratio * (price_bottom - price_top)
+    return None
+
+
+def find_tradingview_solid_reference_lines(
+    image: Any,
+) -> list[dict[str, Any]]:
+    width, height = image.size
+    left, top, right, bottom = tradingview_plot_bounds(width, height)
+    plot_width = right - left
+    if plot_width <= 1:
+        return []
+
+    row_pixels: dict[int, list[int]] = {}
+    pixels = image.load()
+    for y in range(top, bottom):
+        row = [
+            x
+            for x in range(left, right)
+            if is_tradingview_user_line_pixel(*pixels[x, y])
+        ]
+        if row:
+            row_pixels[y] = row
+
+    lines: list[dict[str, Any]] = []
+    for y, xs in row_pixels.items():
+        if is_tradingview_dotted_horizontal_line(xs, plot_width):
+            continue
+        run_start, run_end, run_length = tradingview_row_longest_run(xs)
+        if run_length < TRADINGVIEW_SOLID_LINE_MIN_RUN:
+            continue
+        if (
+            run_start <= left + int(plot_width * 0.02)
+            and run_end >= right - int(plot_width * 0.12)
+            and run_length >= int(plot_width * 0.7)
+        ):
+            continue
+
+        label_cutoff = right - int(plot_width * 0.08)
+        body_xs = [x for x in xs if x < label_cutoff] or xs
+        left_edge = left + int(plot_width * 0.02)
+        min_x = min(body_xs)
+        start_x = run_start if min_x <= left_edge else min_x
+        estimated_price = estimate_tradingview_price_at_y(image, y)
+        lines.append(
+            {
+                "y": y,
+                "start_x": start_x,
+                "run_start": run_start,
+                "run_end": run_end,
+                "run_length": run_length,
+                "start_fraction": (start_x - left) / plot_width,
+                "estimated_price": estimated_price,
+            }
+        )
+    return lines
+
+
 def detect_tradingview_reference_line_start_fraction(
     chart_bytes: bytes,
+    reference_level: float | None = None,
 ) -> float | None:
-    """Return where the user's orange reference line begins within the plot."""
+    """Return where the user's solid reference line begins within the plot."""
     try:
         from PIL import Image
     except ImportError:
@@ -1553,51 +1707,36 @@ def detect_tradingview_reference_line_start_fraction(
     except OSError:
         return None
 
-    width, height = image.size
-    left, top, right, bottom = tradingview_plot_bounds(width, height)
-    plot_width = right - left
-    if plot_width <= 1:
+    lines = find_tradingview_solid_reference_lines(image)
+    if not lines:
         return None
 
-    row_pixels: dict[int, list[int]] = {}
-    pixels = image.load()
-    for y in range(top, bottom):
-        row: list[int] = []
-        for x in range(left, right):
-            red, green, blue = pixels[x, y]
-            if is_tradingview_orange_pixel(red, green, blue):
-                row.append(x)
-        if row:
-            row_pixels[y] = row
+    normalized_level = normalized_reference_level(reference_level)
+    if normalized_level is not None:
+        priced_lines = [
+            line
+            for line in lines
+            if isinstance(line.get("estimated_price"), Real)
+        ]
+        if priced_lines:
+            chosen = min(
+                priced_lines,
+                key=lambda line: abs(float(line["estimated_price"]) - normalized_level),
+            )
+            if abs(float(chosen["estimated_price"]) - normalized_level) <= max(
+                0.75,
+                normalized_level * 0.12,
+            ):
+                return max(0.0, min(1.0, float(chosen["start_fraction"])))
 
-    if not row_pixels:
-        return None
+    chosen = max(lines, key=lambda line: int(line["run_length"]))
+    return max(0.0, min(1.0, float(chosen["start_fraction"])))
 
-    best_row: int | None = None
-    best_run_length = 0
-    for y, xs in row_pixels.items():
-        _start, _end, run_length = tradingview_row_longest_orange_run(xs)
-        if run_length > best_run_length:
-            best_run_length = run_length
-            best_row = y
 
-    if best_row is None or best_run_length < 60:
-        return None
-
-    orange_xs: list[int] = []
-    for y in range(best_row - 2, best_row + 3):
-        orange_xs.extend(row_pixels.get(y, []))
-    if len(orange_xs) < 40:
-        return None
-
-    label_cutoff = right - int(plot_width * 0.08)
-    body_xs = [x for x in orange_xs if x < label_cutoff]
-    if len(body_xs) < 40:
-        body_xs = orange_xs
-
-    start_x = min(body_xs)
-    fraction = (start_x - left) / plot_width
-    return max(0.0, min(1.0, fraction))
+def tradingview_row_longest_orange_run(
+    xs: list[int],
+) -> tuple[int, int, int]:
+    return tradingview_row_longest_run(xs)
 
 
 def detect_review_chart_horizon_start(
@@ -5001,7 +5140,8 @@ async def run_review_button_bot() -> None:
                 )
             reference_line_start_fraction = (
                 detect_tradingview_reference_line_start_fraction(
-                    original_chart_bytes
+                    original_chart_bytes,
+                    normalized_reference_level(record.get("reference_level")),
                 )
             )
             chart_path = temporary_weekly_chart_path(record["symbol"])

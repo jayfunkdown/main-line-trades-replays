@@ -923,10 +923,21 @@ class PostSignalReviewChartHelpersTests(unittest.TestCase):
         buffer = io.BytesIO()
         image.save(buffer, format="PNG")
         fraction = earnings_reactions.detect_tradingview_reference_line_start_fraction(
-            buffer.getvalue()
+            buffer.getvalue(),
+            1.07,
         )
         self.assertIsNotNone(fraction)
         self.assertAlmostEqual(fraction, 0.25, delta=0.03)
+
+    def test_dotted_horizontal_line_is_ignored(self):
+        xs = list(range(100, 900, 8)) + list(range(901, 910))
+        self.assertTrue(
+            earnings_reactions.is_tradingview_dotted_horizontal_line(xs, 1000)
+        )
+        solid = list(range(250, 850))
+        self.assertFalse(
+            earnings_reactions.is_tradingview_dotted_horizontal_line(solid, 1000)
+        )
 
     def test_default_review_chart_horizon_start_is_fallback(self):
         sent_at = earnings_reactions.parse_iso_datetime(
