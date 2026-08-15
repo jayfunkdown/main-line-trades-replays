@@ -178,6 +178,26 @@ class WeeklyScreenerClassifierTests(unittest.TestCase):
         self.assertAlmostEqual(result["level"], 13.06, places=2)
         self.assertNotAlmostEqual(result["level"], 14.54, places=2)
 
+    def test_scan_save_cannot_drop_posted_names(self):
+        disk = weekly_screener.empty_state()
+        disk["seeded"] = True
+        disk["posted"] = {"NFLX:gain:77.65": {"symbol": "NFLX"}}
+        disk["watchlist"] = {"OLD:gain:1": {"symbol": "OLD"}}
+        memory = weekly_screener.empty_state()
+        memory["watchlist"] = {"IMXI:gain:13.06": {"symbol": "IMXI"}}
+        memory["scan"] = {"week_id": "2026-W33"}
+        merged = weekly_screener.merge_persistent_fields(disk, memory)
+        self.assertIn("NFLX:gain:77.65", merged["posted"])
+        self.assertIn("IMXI:gain:13.06", merged["watchlist"])
+        self.assertIn("OLD:gain:1", merged["watchlist"])
+        self.assertTrue(merged["seeded"])
+
+    def test_already_posted_name_ignores_level_changes(self):
+        state = weekly_screener.empty_state()
+        state["posted"] = {"VTRS:loss:16.27": {"symbol": "VTRS"}}
+        self.assertTrue(weekly_screener.already_posted_name(state, "VTRS", "loss"))
+        self.assertFalse(weekly_screener.already_posted_name(state, "VTRS", "gain"))
+
     def test_same_week_close_within_one_percent_is_immediate_signal(self):
         weekly = lnsr_style_gain(close=6.47)
         result = weekly_screener.classify_weekly_structure(weekly)

@@ -44,9 +44,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from zoneinfo import ZoneInfo
 
 try:
@@ -87,6 +88,7 @@ except ModuleNotFoundError:
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 STATE_PATH = PROJECT_ROOT / "data" / "weekly_screener_state.json"
+STATE_LOCK_PATH = PROJECT_ROOT / "data" / "weekly_screener_state.json.lock"
 UNIVERSE_CACHE_PATH = PROJECT_ROOT / "data" / "weekly_screener_universe_cache.json"
 
 EASTERN = ZoneInfo("America/New_York")
@@ -299,6 +301,77 @@ def save_state(state: dict[str, Any]) -> None:
         json.dumps(state, indent=2, sort_keys=True),
         encoding="utf-8",
     )
+
+
+@contextmanager
+def exclusive_state() -> Iterator[None]:
+    STATE_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    handle = STATE_LOCK_PATH.open("a+b")
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0)
+            if handle.read(1) == b"":
+                handle.write(b"0")
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+
+def merge_persistent_fields(disk: dict[str, Any], memory: dict[str, Any]) -> dict[str, Any]:
+    """Union posted/watchlist so a long scan cannot wipe a concurrent watch."""
+    merged = copy.deepcopy(memory)
+    disk_posted = disk.get("posted") if isinstance(disk.get("posted"), dict) else {}
+    mem_posted = memory.get("posted") if isinstance(memory.get("posted"), dict) else {}
+    posted = dict(disk_posted)
+    posted.update(mem_posted)
+    merged["posted"] = posted
+    merged["seeded"] = bool(disk.get("seeded") or memory.get("seeded"))
+    disk_watch = disk.get("watchlist") if isinstance(disk.get("watchlist"), dict) else {}
+    mem_watch = memory.get("watchlist") if isinstance(memory.get("watchlist"), dict) else {}
+    watchlist = dict(disk_watch)
+    watchlist.update(mem_watch)
+    merged["watchlist"] = watchlist
+    disk_daily = disk.get("daily") if isinstance(disk.get("daily"), dict) else {}
+    mem_daily = memory.get("daily") if isinstance(memory.get("daily"), dict) else {}
+    daily: dict[str, Any] = dict(disk_daily)
+    for day, keys in mem_daily.items():
+        existing = list(daily.get(day) or [])
+        if not isinstance(existing, list):
+            existing = []
+        for key in keys if isinstance(keys, list) else []:
+            if key not in existing:
+                existing.append(key)
+        daily[day] = existing
+    merged["daily"] = daily
+    return merged
+
+
+def save_state_locked(memory: dict[str, Any]) -> dict[str, Any]:
+    with exclusive_state():
+        disk = load_state() if STATE_PATH.exists() else empty_state()
+        merged = merge_persistent_fields(disk, memory)
+        save_state(merged)
+        return merged
 
 
 def http_get_text(url: str, *, timeout: int = 30) -> str:
@@ -961,6 +1034,14 @@ def already_posted(state: dict[str, Any], key: str) -> bool:
     return isinstance(posted, dict) and key in posted
 
 
+def already_posted_name(state: dict[str, Any], symbol: str, side: str) -> bool:
+    posted = state.get("posted")
+    if not isinstance(posted, dict):
+        return False
+    prefix = f"{symbol}:{side}:"
+    return any(str(key).startswith(prefix) for key in posted)
+
+
 def mark_posted(
     state: dict[str, Any],
     *,
@@ -1333,7 +1414,9 @@ def evaluate_watchlist(
         if not isinstance(record, dict):
             continue
         key = watch_key(record["symbol"], record["side"], float(record["level"]))
-        if already_posted(state, key):
+        if already_posted(state, key) or already_posted_name(
+            state, str(record["symbol"]), str(record["side"])
+        ):
             continue
         try:
             last_price = latest_chart_close(record["chart_symbol"])
@@ -1549,7 +1632,7 @@ def run_scan_batch(
             instruments=instruments,
             now=current,
         )
-        save_state(working)
+        save_state_locked(working)
     return hits, scanned, failures, admitted
 
 
@@ -1638,7 +1721,7 @@ def main(argv: list[str] | None = None) -> None:
 
     if not state.get("seeded"):
         state = seed_watch_hits(state, hits)
-        save_state(state)
+        save_state_locked(state)
         print(
             f"Seeded weekly screener state with {len(state['posted'])} "
             "current retest hit(s) and posted nothing."
@@ -1651,7 +1734,23 @@ def main(argv: list[str] | None = None) -> None:
         if post_limit is not None and posted_count >= post_limit:
             break
         key = posted_key(hit["symbol"], hit["side"], float(hit["level"]))
-        if already_posted(state, key):
+        reserved = False
+        with exclusive_state():
+            state = load_state()
+            if already_posted(state, key) or already_posted_name(
+                state, str(hit["symbol"]), str(hit["side"])
+            ):
+                continue
+            state = mark_posted(
+                state,
+                key=key,
+                hit=hit,
+                date_label=date_label,
+                message_id=None,
+            )
+            save_state(state)
+            reserved = True
+        if not reserved:
             continue
         message_id = send_discord_message(
             webhook_url,
@@ -1660,14 +1759,13 @@ def main(argv: list[str] | None = None) -> None:
             level=float(hit["level"]),
             level_date=str(hit.get("level_date") or date_label),
         )
-        state = mark_posted(
-            state,
-            key=key,
-            hit=hit,
-            date_label=date_label,
-            message_id=message_id,
-        )
-        save_state(state)
+        with exclusive_state():
+            state = load_state()
+            posted = state.setdefault("posted", {})
+            record = posted.get(key)
+            if isinstance(record, dict):
+                record["discord_message_id"] = message_id
+                save_state(state)
         posted_count += 1
         time.sleep(DISCORD_POST_DELAY_SECONDS)
 

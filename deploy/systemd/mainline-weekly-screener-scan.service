@@ -7,4 +7,4 @@ Wants=network-online.target
 Type=oneshot
 User=jason
 WorkingDirectory=/home/jason/main-line-trades-replays
-ExecStart=/home/jason/main-line-trades-replays/.venv/bin/python /home/jason/main-line-trades-replays/scripts/weekly_screener.py --scan
+ExecStart=/usr/bin/flock -n /home/jason/main-line-trades-replays/data/weekly_screener_scan.lock /home/jason/main-line-trades-replays/.venv/bin/python /home/jason/main-line-trades-replays/scripts/weekly_screener.py --scan
