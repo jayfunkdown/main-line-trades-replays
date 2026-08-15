@@ -242,9 +242,9 @@ class ManualSignalStateTests(unittest.TestCase):
 
     def transactional_update(self, mutation):
         latest = copy.deepcopy(self.state)
-        mutation(latest)
+        result = mutation(latest)
         self.state = latest
-        return copy.deepcopy(latest)
+        return copy.deepcopy(latest), result
 
     def test_claim_transition_and_attempt_guard(self):
         with patch.object(
@@ -347,10 +347,10 @@ class ManualSignalWorkflowTests(unittest.IsolatedAsyncioTestCase):
 
     def transactional_update(self, mutation):
         latest = copy.deepcopy(self.state)
-        mutation(latest)
+        result = mutation(latest)
         self.state.clear()
         self.state.update(copy.deepcopy(latest))
-        return copy.deepcopy(latest)
+        return copy.deepcopy(latest), result
 
     def set_record(self, section, key, value):
         latest = copy.deepcopy(self.state)

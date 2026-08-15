@@ -531,9 +531,9 @@ class TransactionalReviewCaptureTests(unittest.TestCase):
 
     def transactional_update(self, mutation):
         latest = copy.deepcopy(self.state)
-        mutation(latest)
+        result = mutation(latest)
         self.state = latest
-        return copy.deepcopy(latest)
+        return copy.deepcopy(latest), result
 
     def review_record(self, **updates):
         values = {

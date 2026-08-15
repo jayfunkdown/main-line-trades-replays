@@ -293,10 +293,10 @@ class EarningsReviewInteractionAuthorizationTests(
     def transactional_update(state):
         def update(mutation):
             latest = copy.deepcopy(state)
-            mutation(latest)
+            result = mutation(latest)
             state.clear()
             state.update(copy.deepcopy(latest))
-            return copy.deepcopy(latest)
+            return copy.deepcopy(latest), result
 
         return update
 

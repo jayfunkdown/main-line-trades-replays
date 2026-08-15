@@ -3025,7 +3025,8 @@ def claim_manual_signal_delivery(
         record.pop("signals_message_id", None)
         outcome = "claimed"
 
-    return update_state(mutation), outcome
+    state, _result = update_state(mutation)
+    return state, outcome
 
 
 def transition_manual_signal_delivery(
@@ -3088,7 +3089,8 @@ def transition_manual_signal_delivery(
             record["signals_message_id"] = str(signals_message_id)
         outcome = "transitioned"
 
-    return update_state(mutation), outcome
+    state, _result = update_state(mutation)
+    return state, outcome
 
 
 def update_manual_signal_draft(
@@ -3149,7 +3151,8 @@ def update_manual_signal_draft(
             record["chart"] = copy.deepcopy(chart)
         outcome = "updated"
 
-    return update_state(mutation), outcome
+    state, _result = update_state(mutation)
+    return state, outcome
 
 
 def set_manual_signal_direction(
@@ -3185,7 +3188,8 @@ def set_manual_signal_direction(
         record["updated_at"] = updated_at
         outcome = "updated"
 
-    return update_state(mutation), outcome
+    state, _result = update_state(mutation)
+    return state, outcome
 
 
 def cancel_manual_signal_draft(
@@ -3218,7 +3222,8 @@ def cancel_manual_signal_draft(
         record["updated_at"] = canceled_at
         outcome = "canceled"
 
-    return update_state(mutation), outcome
+    state, _result = update_state(mutation)
+    return state, outcome
 
 
 def find_signal_item_by_review_message(
@@ -3381,7 +3386,7 @@ def claim_signal_delivery(
         item.pop("signals_message_id", None)
         outcome = "claimed"
 
-    state = update_state(mutation)
+    state, _result = update_state(mutation)
     return state, outcome
 
 
@@ -3449,7 +3454,7 @@ def transition_signal_delivery(
         item.update(stored_updates)
         outcome = "transitioned"
 
-    state = update_state(mutation)
+    state, _result = update_state(mutation)
     return state, outcome
 
 
@@ -6608,11 +6613,8 @@ def load_state() -> dict[str, Any]:
 
 def update_state(
     mutation: Callable[[dict[str, Any]], Any],
-) -> dict[str, Any]:
-    state, _result = earnings_state_store().transaction(
-        mutation
-    )
-    return state
+) -> tuple[dict[str, Any], Any]:
+    return earnings_state_store().transaction(mutation)
 
 
 def set_state_record(
@@ -6625,7 +6627,8 @@ def set_state_record(
     def mutation(state: dict[str, Any]) -> None:
         state[section][key] = stored_value
 
-    return update_state(mutation)
+    state, _result = update_state(mutation)
+    return state
 
 
 def feed_delivery_status(
@@ -6846,7 +6849,8 @@ def persist_quote_cache_changes(
         prune_quote_cache(state)
         state["quotes"].update(changed_quotes)
 
-    return update_state(mutation)
+    state, _result = update_state(mutation)
+    return state
 
 
 

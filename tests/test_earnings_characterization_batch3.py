@@ -305,12 +305,12 @@ class SendToSignalsRaceAndProvenanceTests(unittest.IsolatedAsyncioTestCase):
     def transactional_update(persisted_state, event=None):
         def update(mutation):
             latest = json.loads(json.dumps(persisted_state))
-            mutation(latest)
+            result = mutation(latest)
             persisted_state.clear()
             persisted_state.update(json.loads(json.dumps(latest)))
             if event is not None:
                 event()
-            return json.loads(json.dumps(latest))
+            return json.loads(json.dumps(latest)), result
 
         return update
 

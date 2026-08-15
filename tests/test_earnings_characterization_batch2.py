@@ -398,12 +398,12 @@ class SendToSignalsCharacterizationTests(unittest.IsolatedAsyncioTestCase):
     def transactional_update(persisted_state, failure=None):
         def update(mutation):
             latest = copy.deepcopy(persisted_state)
-            mutation(latest)
+            result = mutation(latest)
             if failure is not None:
                 raise failure
             persisted_state.clear()
             persisted_state.update(copy.deepcopy(latest))
-            return copy.deepcopy(latest)
+            return copy.deepcopy(latest), result
 
         return update
 
