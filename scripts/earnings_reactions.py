@@ -7,7 +7,7 @@ Creates two ranked earnings feeds:
 
 1. Public earnings reactions
    - High-importance names only
-   - Default maximum: 15
+   - Default maximum: 10
 
 2. Private earnings review
    - Broader chart-review queue
@@ -25,7 +25,7 @@ Optional for private posting:
     EARNINGS_REVIEW_WEBHOOK
 
 Optional configuration:
-    EARNINGS_PUBLIC_MAX=15
+    EARNINGS_PUBLIC_MAX=10
     EARNINGS_PRIVATE_MAX=50
     EARNINGS_PRIVATE_MOVE_PCT=5
     EARNINGS_PUBLIC_MOVE_PCT=15
@@ -363,6 +363,13 @@ def env_float(name: str, default: float) -> float:
         raise RuntimeError(
             f"{name} must be a number."
         ) from exc
+
+
+def post_signal_review_draft_concurrency() -> int:
+    return max(
+        1,
+        min(env_int("POST_SIGNAL_REVIEW_DRAFT_CONCURRENCY", 2), 4),
+    )
 
 
 def safe_number(value: Any) -> float | None:
@@ -1658,6 +1665,8 @@ def tradingview_line_record_from_row(
 def find_tradingview_reference_line_near_level(
     image: Any,
     reference_level: float,
+    *,
+    price_points: list[tuple[float, int]] | None = None,
 ) -> dict[str, Any] | None:
     from PIL import Image
 
@@ -1675,7 +1684,8 @@ def find_tradingview_reference_line_near_level(
     if normalized_level is None:
         return None
 
-    price_points = tradingview_price_axis_points(image)
+    if price_points is None:
+        price_points = tradingview_price_axis_points(image)
     target_y = tradingview_interpolate_y_for_price(price_points, normalized_level)
     tolerance = tradingview_reference_price_tolerance(normalized_level)
     pixels = image.load()
@@ -1713,7 +1723,11 @@ def find_tradingview_reference_line_near_level(
         non_premarket_bands.append((band_start, band_end, band_center))
 
     for band_start, band_end, band_center in non_premarket_bands:
-        band_price = estimate_tradingview_price_at_y(image, band_center)
+        band_price = estimate_tradingview_price_at_y(
+            image,
+            band_center,
+            price_points,
+        )
         if band_price is not None:
             if abs(band_price - normalized_level) > tolerance:
                 continue
@@ -1734,7 +1748,11 @@ def find_tradingview_reference_line_near_level(
                 if is_tradingview_orange_pixel(*pixels[x, scan_y]):
                     orange_xs.add(x)
         merged_orange = sorted(orange_xs)
-        estimated_price = estimate_tradingview_price_at_y(image, row_y)
+        estimated_price = estimate_tradingview_price_at_y(
+            image,
+            row_y,
+            price_points,
+        )
         xs = merged_orange
         min_run = TRADINGVIEW_PARTIAL_LINE_MIN_RUN
         if not xs:
@@ -1920,8 +1938,13 @@ def tradingview_price_axis_points(image: Any) -> list[tuple[float, int]]:
 def estimate_tradingview_price_at_y(
     image: Any,
     y: int,
+    price_points: list[tuple[float, int]] | None = None,
 ) -> float | None:
-    points = tradingview_price_axis_points(image)
+    points = (
+        price_points
+        if price_points is not None
+        else tradingview_price_axis_points(image)
+    )
     if len(points) < 2:
         return None
 
@@ -1940,6 +1963,8 @@ def estimate_tradingview_price_at_y(
 def find_tradingview_solid_reference_lines(
     image: Any,
     reference_level: float | None = None,
+    *,
+    price_points: list[tuple[float, int]] | None = None,
 ) -> list[dict[str, Any]]:
     from PIL import Image
 
@@ -1953,7 +1978,8 @@ def find_tradingview_solid_reference_lines(
         return []
 
     normalized_level = normalized_reference_level(reference_level)
-    price_points = tradingview_price_axis_points(image)
+    if price_points is None:
+        price_points = tradingview_price_axis_points(image)
     target_y = (
         tradingview_interpolate_y_for_price(price_points, normalized_level)
         if normalized_level is not None
@@ -1979,7 +2005,7 @@ def find_tradingview_solid_reference_lines(
 
     lines: list[dict[str, Any]] = []
     for y, xs in row_pixels.items():
-        estimated_price = estimate_tradingview_price_at_y(image, y)
+        estimated_price = estimate_tradingview_price_at_y(image, y, price_points)
         near_reference = (
             normalized_level is not None
             and estimated_price is not None
@@ -2037,11 +2063,17 @@ def detect_tradingview_reference_line_start_fraction(
         return None
 
     normalized_level = normalized_reference_level(reference_level)
-    lines = find_tradingview_solid_reference_lines(image, normalized_level)
+    price_points = tradingview_price_axis_points(image)
+    lines = find_tradingview_solid_reference_lines(
+        image,
+        normalized_level,
+        price_points=price_points,
+    )
     if normalized_level is not None:
         near_level = find_tradingview_reference_line_near_level(
             image,
             normalized_level,
+            price_points=price_points,
         )
         if near_level is not None:
             lines.append(near_level)
@@ -2102,6 +2134,21 @@ def detect_review_chart_horizon_start(
         )
     except (OSError, pytesseract.TesseractNotFoundError, RuntimeError, ValueError):
         return None
+
+
+def prepare_post_signal_review_chart_analysis(
+    chart_bytes: bytes,
+    sent_at: datetime,
+    reference_level: float | None,
+) -> tuple[datetime, float | None]:
+    """Run chart OCR/chart parsing off the asyncio event loop."""
+    chart_horizon_start_at = detect_review_chart_horizon_start(
+        chart_bytes,
+        sent_at,
+    )
+    if chart_horizon_start_at is None:
+        chart_horizon_start_at = default_review_chart_horizon_start(sent_at)
+    return chart_horizon_start_at, None
 
 
 def weekly_candles_from_horizon(
@@ -2272,6 +2319,8 @@ def generate_weekly_chart(
             and len(weekly) > 1
         ):
             line_start = reference_line_start_fraction * (len(weekly) - 1)
+        elif review_chart and len(weekly) > 1:
+            line_start = 0.0
         else:
             line_start = next(
                 (
@@ -5465,17 +5514,11 @@ async def run_review_button_bot() -> None:
             )
             record["current_price"] = current_price
             sent_at = parse_iso_datetime(record["sent_at"])
-            chart_horizon_start_at = detect_review_chart_horizon_start(
-                original_chart_bytes,
-                sent_at,
-            )
-            if chart_horizon_start_at is None:
-                chart_horizon_start_at = default_review_chart_horizon_start(
-                    sent_at
-                )
-            reference_line_start_fraction = (
-                detect_tradingview_reference_line_start_fraction(
+            chart_horizon_start_at, _reference_line_start_fraction = (
+                await asyncio.to_thread(
+                    prepare_post_signal_review_chart_analysis,
                     original_chart_bytes,
+                    sent_at,
                     normalized_reference_level(record.get("reference_level")),
                 )
             )
@@ -5496,7 +5539,6 @@ async def run_review_button_bot() -> None:
                 ),
                 review_chart=True,
                 chart_horizon_start_at=chart_horizon_start_at,
-                reference_line_start_fraction=reference_line_start_fraction,
             )
             draft_channel = client.get_channel(signal_review_drafts_channel_id)
             if draft_channel is None:
@@ -5617,8 +5659,26 @@ async def run_review_button_bot() -> None:
                     if is_due_post_signal_review(record, now)
                 ] if isinstance(reviews, dict) else []
                 due.sort(key=lambda pair: pair[1]["review_due_at"])
-                for review_id, record in due:
-                    await create_due_post_signal_review_draft(review_id, record)
+                if due:
+                    concurrency = post_signal_review_draft_concurrency()
+                    semaphore = asyncio.Semaphore(concurrency)
+
+                    async def process_due_review(
+                        review_id: str,
+                        record: dict[str, Any],
+                    ) -> None:
+                        async with semaphore:
+                            await create_due_post_signal_review_draft(
+                                review_id,
+                                record,
+                            )
+
+                    await asyncio.gather(
+                        *(
+                            process_due_review(review_id, record)
+                            for review_id, record in due
+                        )
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -8253,8 +8313,8 @@ def main() -> None:
     )
 
     public_max = min(
-        env_int("EARNINGS_PUBLIC_MAX", 15),
-        15,
+        env_int("EARNINGS_PUBLIC_MAX", 10),
+        10,
     )
 
     private_candidates = private_candidates[:private_max]

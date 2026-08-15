@@ -1047,6 +1047,146 @@ class PostSignalReviewChartHelpersTests(unittest.TestCase):
         self.assertEqual(earnings_reactions.format_chart_level_label(120.0), "120")
         self.assertEqual(earnings_reactions.format_chart_level_label(1.2345), "1.2345")
 
+    def test_find_tradingview_solid_reference_lines_reuses_price_axis_ocr_once(self):
+        try:
+            from PIL import Image, ImageDraw
+        except ImportError:
+            self.skipTest("Pillow is unavailable")
+
+        image = Image.new("RGB", (1000, 600), "#131722")
+        draw = ImageDraw.Draw(image)
+        left, top, right, bottom = earnings_reactions.tradingview_plot_bounds(
+            1000,
+            600,
+        )
+        line_y = int((top + bottom) / 2)
+        for y in range(top, bottom, 3):
+            draw.point((left + 300, y), fill=(255, 152, 0))
+        draw.line(
+            (left + 250, line_y, right - 50, line_y),
+            fill=(255, 152, 0),
+            width=2,
+        )
+
+        ocr_calls = 0
+        original = earnings_reactions.tradingview_price_axis_points
+
+        def counting_axis_points(img):
+            nonlocal ocr_calls
+            ocr_calls += 1
+            return original(img)
+
+        with patch.object(
+            earnings_reactions,
+            "tradingview_price_axis_points",
+            side_effect=counting_axis_points,
+        ):
+            lines = earnings_reactions.find_tradingview_solid_reference_lines(
+                image,
+                1.07,
+            )
+
+        self.assertGreater(len(lines), 0)
+        self.assertEqual(ocr_calls, 1)
+
+    def test_prepare_post_signal_review_chart_analysis_uses_horizon_fallback(self):
+        sent_at = earnings_reactions.parse_iso_datetime(
+            "2026-08-14T07:25:34-04:00"
+        )
+        with patch.object(
+            earnings_reactions,
+            "detect_review_chart_horizon_start",
+            return_value=None,
+        ):
+            horizon, fraction = (
+                earnings_reactions.prepare_post_signal_review_chart_analysis(
+                    b"chart-bytes",
+                    sent_at,
+                    1.07,
+                )
+            )
+
+        self.assertEqual(horizon.date().isoformat(), "2024-09-14")
+        self.assertIsNone(fraction)
+
+    def test_review_chart_draws_full_width_reference_line_at_stored_price(self):
+        from datetime import datetime, timedelta, timezone
+
+        import matplotlib.axes._axes as axes_module
+
+        daily = []
+        start = datetime(2023, 1, 2, tzinfo=timezone.utc)
+        for index in range(500):
+            day = start + timedelta(days=index)
+            if day.weekday() >= 5:
+                continue
+            price = 10.0 + index * 0.05
+            daily.append(
+                {
+                    "timestamp": day.timestamp(),
+                    "open": price,
+                    "high": price + 1.0,
+                    "low": price - 1.0,
+                    "close": price + 0.5,
+                    "volume": 1000.0,
+                }
+            )
+
+        hline_calls: list[tuple] = []
+        original_hlines = axes_module.Axes.hlines
+
+        def capture_hlines(_self, y, xmin, xmax, **kwargs):
+            hline_calls.append((float(y), float(xmin), float(xmax), kwargs))
+            return original_hlines(_self, y, xmin, xmax, **kwargs)
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            earnings_reactions,
+            "PROJECT_ROOT",
+            Path(temp_dir),
+        ), patch.object(
+            earnings_reactions,
+            "fetch_daily_candles",
+            return_value=daily,
+        ), patch.object(
+            axes_module.Axes,
+            "hlines",
+            capture_hlines,
+        ):
+            output_path = Path(temp_dir) / "review.png"
+            earnings_reactions.generate_weekly_chart(
+                "LNSR",
+                output_path=output_path,
+                level_segments=[
+                    {
+                        "price": 12.21,
+                        "start_date": "2026-08-14",
+                    }
+                ],
+                review_chart=True,
+                chart_horizon_start_at=earnings_reactions.parse_iso_datetime(
+                    "2023-06-01T00:00:00-04:00"
+                ),
+            )
+
+        self.assertEqual(len(hline_calls), 1)
+        price, xmin, xmax, kwargs = hline_calls[0]
+        self.assertAlmostEqual(price, 12.21)
+        self.assertAlmostEqual(xmin, 0.0)
+        self.assertGreater(xmax, xmin)
+        self.assertEqual(kwargs.get("color"), "#FF9800")
+
+    def test_post_signal_review_scheduler_runs_due_reviews_with_bounded_concurrency(self):
+        source = Path(earnings_reactions.__file__).read_text(encoding="utf-8")
+        scheduler = source[
+            source.index("    async def post_signal_review_scheduler("):
+            source.index("    class SentEarningsReviewView(")
+        ]
+        self.assertIn("post_signal_review_draft_concurrency()", scheduler)
+        self.assertIn("asyncio.Semaphore(concurrency)", scheduler)
+        self.assertIn("await asyncio.gather", scheduler)
+        self.assertIn("prepare_post_signal_review_chart_analysis", source)
+        self.assertIn("await asyncio.to_thread(", source)
+
 
 if __name__ == "__main__":
     unittest.main()
