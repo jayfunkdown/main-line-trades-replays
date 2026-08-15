@@ -1,0 +1,13 @@
+[Unit]
+Description=Hourly weekly screener scan after each market weekly close (disabled until preview)
+
+[Timer]
+OnCalendar=Fri *-*-* 16:30:00 America/New_York
+OnCalendar=Fri *-*-* 17..23:00:00 America/New_York
+OnCalendar=Sat,Sun *-*-* *:00:00 America/New_York
+OnCalendar=Mon *-*-* 00..12:00:00 UTC
+Persistent=true
+Unit=mainline-weekly-screener-scan.service
+
+[Install]
+WantedBy=timers.target

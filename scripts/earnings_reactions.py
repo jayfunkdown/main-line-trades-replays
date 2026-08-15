@@ -2206,6 +2206,7 @@ def generate_weekly_chart(
     review_chart: bool = False,
     chart_horizon_start_at: datetime | None = None,
     reference_line_start_fraction: float | None = None,
+    full_width_levels: bool = False,
 ) -> Path:
     """
     Generate the earnings weekly candlestick chart.
@@ -2319,7 +2320,7 @@ def generate_weekly_chart(
             and len(weekly) > 1
         ):
             line_start = reference_line_start_fraction * (len(weekly) - 1)
-        elif review_chart and len(weekly) > 1:
+        elif (review_chart or full_width_levels) and len(weekly) > 1:
             line_start = 0.0
         else:
             line_start = next(
@@ -2335,10 +2336,10 @@ def generate_weekly_chart(
             line_start,
             len(weekly) - 0.35,
             color="#FF9800",
-            linewidth=2.2 if review_chart else 1.8,
+            linewidth=2.2 if review_chart or full_width_levels else 1.8,
             zorder=4,
         )
-        if review_chart:
+        if review_chart or full_width_levels:
             ax.text(
                 len(weekly) - 0.28,
                 level_price,
@@ -2364,7 +2365,7 @@ def generate_weekly_chart(
                 zorder=5,
             )
 
-    if review_chart and reference_levels:
+    if (review_chart or full_width_levels) and reference_levels:
         ymin, ymax = weekly_chart_price_limits(
             weekly,
             reference_levels=reference_levels,

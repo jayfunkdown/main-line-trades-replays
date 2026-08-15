@@ -1,0 +1,10 @@
+[Unit]
+Description=Check weekly screener watchlist every 15 minutes (disabled until preview)
+
+[Timer]
+OnCalendar=*-*-* *:00,15,30,45:00 America/New_York
+Persistent=true
+Unit=mainline-weekly-screener-watch.service
+
+[Install]
+WantedBy=timers.target

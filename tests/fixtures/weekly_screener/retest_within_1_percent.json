@@ -1,0 +1,7 @@
+{
+  "expected": true,
+  "label": "Last price within 1 percent of the watched weekly level",
+  "last_price": 10.09,
+  "level": 10.0,
+  "proximity": 0.01
+}

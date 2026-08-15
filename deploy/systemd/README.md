@@ -40,6 +40,24 @@ sudo rm -f /etc/systemd/system/mainline-trendspider.service \
 sudo systemctl daemon-reload
 ```
 
+Weekly screener units exist but must stay **disabled** until `--preview`
+is clean and `data/weekly_screener_state.json` has been seeded so the
+first `--watch` does not dump a backlog:
+
+```
+deploy/systemd/mainline-weekly-screener-scan.service
+deploy/systemd/mainline-weekly-screener-scan.timer
+deploy/systemd/mainline-weekly-screener-watch.service
+deploy/systemd/mainline-weekly-screener-watch.timer
+```
+
+`--scan` admits weekly gains/losses to a watchlist with no Discord post.
+US batches run Friday 4:30 PM ET through Sunday. Crypto batches run after
+Monday 00:00 UTC, when that weekly has printed. `--watch` posts to
+`WEEKLY_SCREENER_WEBHOOK` when last price is within 1% of that level
+(every 15 minutes). Public beta channel from day one — no private review
+queue. Do not `enable --now` either timer until preview looks right.
+
 The units assume the repository is at
 `/home/jason/main-line-trades-replays` with its virtual environment at
 `.venv/`. Secrets remain in the project's untracked `.env` file and must not be
