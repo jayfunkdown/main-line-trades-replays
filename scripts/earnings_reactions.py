@@ -110,6 +110,8 @@ DISCORD_BULK_DELETE_SAFE_AGE = timedelta(days=13, hours=23)
 DISCORD_API_BASE = "https://discord.com/api/v10"
 YAHOO_CHART_BASE = "https://query1.finance.yahoo.com/v8/finance/chart"
 WEEKLY_CHART_WEEKS = 52
+POST_SIGNAL_REVIEW_CHART_LOOKBACK_MONTHS = 23
+POST_SIGNAL_REVIEW_CHART_MAX_WEEKS = 260
 
 SIGNAL_DELIVERY_READY = "ready"
 SIGNAL_DELIVERY_SENDING = "sending"
@@ -1283,6 +1285,58 @@ def aggregate_weekly_candles(
     return weekly[-max_weeks:]
 
 
+def calendar_months_before(value: Any, months: int) -> datetime:
+    if months < 0:
+        raise ValueError("Calendar month lookback must be zero or positive.")
+
+    anchor = parse_iso_datetime(value)
+    if anchor is None:
+        raise ValueError("Chart horizon dates must be valid ISO datetimes.")
+
+    year = anchor.year
+    month = anchor.month - months
+    while month <= 0:
+        month += 12
+        year -= 1
+
+    target_day = min(
+        anchor.day,
+        calendar.monthrange(year, month)[1],
+    )
+    return anchor.replace(
+        year=year,
+        month=month,
+        day=target_day,
+    )
+
+
+def default_review_chart_horizon_start(sent_at: datetime) -> datetime:
+    """Match the typical weekly signal chart span ending at send time."""
+    return calendar_months_before(
+        sent_at.isoformat(),
+        POST_SIGNAL_REVIEW_CHART_LOOKBACK_MONTHS,
+    )
+
+
+def weekly_candles_from_horizon(
+    weekly: list[dict[str, Any]],
+    horizon_start: datetime,
+) -> list[dict[str, Any]]:
+    if horizon_start.tzinfo is None:
+        raise ValueError("Chart horizon dates must be timezone-aware.")
+
+    horizon_date = horizon_start.date()
+    start_index = next(
+        (
+            index
+            for index, candle in enumerate(weekly)
+            if candle["date"].date() >= horizon_date
+        ),
+        len(weekly) - 1,
+    )
+    return weekly[start_index:]
+
+
 def weekly_chart_price_limits(
     weekly: list[dict[str, Any]],
     *,
@@ -1317,6 +1371,7 @@ def generate_weekly_chart(
     weeks: int = WEEKLY_CHART_WEEKS,
     level_segments: list[dict[str, Any]] | None = None,
     review_chart: bool = False,
+    chart_horizon_start_at: datetime | None = None,
 ) -> Path:
     """
     Generate the earnings weekly candlestick chart.
@@ -1334,9 +1389,17 @@ def generate_weekly_chart(
         ) from exc
 
     daily = fetch_daily_candles(symbol)
-    weekly = aggregate_weekly_candles(daily, max_weeks=weeks)
-    if weeks < 4:
+    chart_weeks = (
+        POST_SIGNAL_REVIEW_CHART_MAX_WEEKS
+        if review_chart
+        else weeks
+    )
+    weekly = aggregate_weekly_candles(daily, max_weeks=chart_weeks)
+    if not review_chart and weeks < 4:
         raise ValueError("Weekly chart history must include at least four weeks.")
+
+    if review_chart and chart_horizon_start_at is not None:
+        weekly = weekly_candles_from_horizon(weekly, chart_horizon_start_at)
 
     if len(weekly) < 4:
         raise RuntimeError(
@@ -1416,17 +1479,20 @@ def generate_weekly_chart(
         if isinstance(price, bool) or not isinstance(price, Real) or start_date is None:
             raise ValueError("Chart levels require numeric prices and ISO start dates.")
         level_price = float(price)
-        start_index = next(
-            (
-                index
-                for index, candle in enumerate(weekly)
-                if candle["date"].date() >= start_date.date()
-            ),
-            len(weekly) - 1,
-        )
+        if review_chart:
+            line_start = 0.0
+        else:
+            line_start = next(
+                (
+                    index
+                    for index, candle in enumerate(weekly)
+                    if candle["date"].date() >= start_date.date()
+                ),
+                len(weekly) - 1,
+            )
         ax.hlines(
             level_price,
-            start_index,
+            line_start,
             len(weekly) - 0.35,
             color="#FF9800",
             linewidth=2.2 if review_chart else 1.8,
@@ -4612,7 +4678,6 @@ async def run_review_button_bot() -> None:
                 generate_weekly_chart,
                 record["symbol"],
                 output_path=chart_path,
-                weeks=130,
                 level_segments=(
                     [
                         {
@@ -4624,6 +4689,9 @@ async def run_review_button_bot() -> None:
                     else None
                 ),
                 review_chart=True,
+                chart_horizon_start_at=default_review_chart_horizon_start(
+                    parse_iso_datetime(record["sent_at"])
+                ),
             )
             draft_channel = client.get_channel(signal_review_drafts_channel_id)
             if draft_channel is None:

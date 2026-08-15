@@ -807,6 +807,29 @@ class PostSignalReviewChartHelpersTests(unittest.TestCase):
             )
         return weekly
 
+    def test_calendar_months_before_clamps_month_end(self):
+        horizon = earnings_reactions.calendar_months_before(
+            "2026-08-14T07:25:34-04:00",
+            earnings_reactions.POST_SIGNAL_REVIEW_CHART_LOOKBACK_MONTHS,
+        )
+        self.assertEqual(horizon.isoformat(), "2024-09-14T07:25:34-04:00")
+
+    def test_weekly_candles_from_horizon_starts_at_september_2024(self):
+        weekly = self.build_weekly("2024-02-05", 130, base=1.0)
+        horizon = earnings_reactions.parse_iso_datetime("2024-09-14T07:25:34-04:00")
+
+        sliced = earnings_reactions.weekly_candles_from_horizon(weekly, horizon)
+
+        self.assertEqual(sliced[0]["date"].date().isoformat(), "2024-09-16")
+        self.assertLess(len(sliced), len(weekly))
+
+    def test_default_review_chart_horizon_start_matches_signal_span(self):
+        sent_at = earnings_reactions.parse_iso_datetime(
+            "2026-08-14T07:25:34-04:00"
+        )
+        horizon = earnings_reactions.default_review_chart_horizon_start(sent_at)
+        self.assertEqual(horizon.date().isoformat(), "2024-09-14")
+
     def test_weekly_chart_price_limits_include_reference_level(self):
         weekly = self.build_weekly("2026-05-05", 20, base=1.0)
         for candle in weekly[:15]:
