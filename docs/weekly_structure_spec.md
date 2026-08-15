@@ -10,7 +10,8 @@ Do not special-case live tickers. If a new chart disagrees with a rule
 below, change this file first.
 
 Trained from Jason’s charts: LNSR 6.42, MH 12.21, CRMD 7.13, PODC,
-POWERGRID, BSX, SGA, and NFLX 77.65.
+POWERGRID, BSX, SGA, NFLX 77.65, AM 22.65, CGSM 26.49, FEPI 42.34,
+IBDT 25.38, and JNK 96.7.
 
 ---
 
@@ -90,19 +91,32 @@ Short. Both are valid.
 
 Gaining or losing the weekly is the **close through** the origin body.
 
-After that, two situations both matter:
+After that, the only signal is the **first test** of that same body:
 
-- Price has run **away** from the body (LNSR 8.27 vs 6.42, PODC still
-  above 2.43). The weekly has been taken. That is watch-only until price
-  comes back.
-- Price is **within 1%** of that same body:
-  `abs(last - level) / level <= 0.01`
+`abs(price - level) / level <= 0.01`
 
-  That 1% includes a later retest into the line **or** the **same week
-  it was taken**, if the close is still inside 1% (NFLX 78.16 vs 77.65).
-  Do **not** wait for a deeper pullback in that case.
+A wick into that 1% band counts as a visit. The take week itself only
+counts if the **close** is still inside 1% (NFLX 78.16 vs 77.65). The
+breakout week’s range slicing through the line is not a retest when the
+close has already run away (LNSR 8.27 vs 6.42).
 
-The same 1% rule applies to shorts.
+**First test only.** After price has visited the level once, later tags
+do not count — second visit, third visit, still sitting on it weeks later.
+This is the same on **every** chart: US stocks, crypto, ETFs. It is a
+price-action rule, not a market-specific rule.
+
+AM 22.65: first cluster at the line is the signal; the later return is
+not. CGSM 26.49: the circled first test is the signal; current price still
+near the line weeks later is not. FEPI 42.34: it gained, then the next
+week tested back — that first test is the signal; sitting on the line
+now is not. IBDT 25.38 and JNK 96.7: after the weekly was lost, the
+circled first rally back into the line is the signal; later tests are
+not.
+
+If the scanner was not running on that first test, do **not** fire when
+price comes back. The first test already happened.
+
+The same 1% / first-test rule applies to shorts.
 
 ---
 

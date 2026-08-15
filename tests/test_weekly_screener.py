@@ -196,6 +196,44 @@ class WeeklyScreenerClassifierTests(unittest.TestCase):
     def test_exact_1_percent_is_a_hit(self):
         self.assertTrue(weekly_screener.is_retest(10.1, 10.0, proximity=0.01))
 
+    def test_first_test_of_the_level_is_the_only_signal(self):
+        weekly = lnsr_style_gain(close=8.27)
+        weekly.extend(
+            make_weekly(
+                [
+                    ("2026-06-22T20:00:00+00:00", 7.20, 7.40, 6.38, 6.50),
+                    ("2026-06-29T20:00:00+00:00", 6.50, 8.10, 6.40, 7.90),
+                    ("2026-07-06T20:00:00+00:00", 7.90, 8.20, 6.35, 6.48),
+                ]
+            )
+        )
+        self.assertTrue(
+            weekly_screener.first_visit_already_used(
+                weekly,
+                side="gain",
+                level=6.42,
+                proximity=0.01,
+            )
+        )
+
+    def test_current_week_first_test_is_still_valid(self):
+        weekly = lnsr_style_gain(close=8.27)
+        weekly.extend(
+            make_weekly(
+                [
+                    ("2026-06-22T20:00:00+00:00", 7.20, 7.40, 6.38, 6.50),
+                ]
+            )
+        )
+        self.assertFalse(
+            weekly_screener.first_visit_already_used(
+                weekly,
+                side="gain",
+                level=6.42,
+                proximity=0.01,
+            )
+        )
+
     def test_us_scan_waits_for_friday_cash_close(self):
         friday_open = datetime(2026, 8, 14, 15, 59, tzinfo=EASTERN)
         friday_close = datetime(2026, 8, 14, 16, 0, tzinfo=EASTERN)
@@ -617,6 +655,14 @@ class WeeklyScreenerRunTests(unittest.TestCase):
                 return_value=12.05,
             ), patch.object(
                 weekly_screener,
+                "fetch_weekly_from_yahoo",
+                return_value=(lnsr_style_gain(close=8.27), SAMPLE_DAILY),
+            ), patch.object(
+                weekly_screener,
+                "first_visit_already_used",
+                return_value=False,
+            ), patch.object(
+                weekly_screener,
                 "send_discord_message",
                 side_effect=lambda *args, **kwargs: posted.append(True) or "id",
             ), patch.dict(
@@ -671,6 +717,14 @@ class WeeklyScreenerRunTests(unittest.TestCase):
                 weekly_screener,
                 "latest_chart_close",
                 side_effect=last_price,
+            ), patch.object(
+                weekly_screener,
+                "fetch_weekly_from_yahoo",
+                return_value=(lnsr_style_gain(close=8.27), SAMPLE_DAILY),
+            ), patch.object(
+                weekly_screener,
+                "first_visit_already_used",
+                return_value=False,
             ), patch.object(
                 weekly_screener,
                 "send_discord_message",

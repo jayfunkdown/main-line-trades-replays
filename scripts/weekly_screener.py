@@ -793,9 +793,7 @@ def classify_weekly_structure(weekly: list[dict[str, Any]]) -> dict[str, Any]:
             "close": close,
         }
     taken.sort(key=lambda item: int(item.get("origin_index") or 0), reverse=True)
-    hit = dict(taken[0])
-    hit.pop("origin_index", None)
-    return hit
+    return dict(taken[0])
 
 
 def retest_distance(last_price: float, level: float) -> float:
@@ -811,6 +809,84 @@ def is_retest(
     proximity: float = DEFAULT_RETEST_PCT / 100.0,
 ) -> bool:
     return retest_distance(last_price, level) <= proximity
+
+
+def candle_range_hits_band(
+    candle: dict[str, Any],
+    level: float,
+    *,
+    proximity: float,
+) -> bool:
+    if level == 0:
+        return False
+    band_low = abs(float(level)) * (1.0 - proximity)
+    band_high = abs(float(level)) * (1.0 + proximity)
+    return float(candle["high"]) >= band_low and float(candle["low"]) <= band_high
+
+
+def first_take_index(
+    weekly: list[dict[str, Any]],
+    *,
+    side: str,
+    level: float,
+    origin_index: int,
+) -> int | None:
+    for index in range(origin_index + 1, len(weekly)):
+        close = float(weekly[index]["close"])
+        if side == "gain" and close > float(level):
+            return index
+        if side == "loss" and close < float(level):
+            return index
+    return None
+
+
+def first_visit_index(
+    weekly: list[dict[str, Any]],
+    *,
+    side: str,
+    level: float,
+    origin_index: int,
+    proximity: float,
+) -> int | None:
+    take_index = first_take_index(
+        weekly,
+        side=side,
+        level=level,
+        origin_index=origin_index,
+    )
+    if take_index is None:
+        return None
+    if is_retest(float(weekly[take_index]["close"]), level, proximity=proximity):
+        return take_index
+    for index in range(take_index + 1, len(weekly)):
+        if candle_range_hits_band(weekly[index], level, proximity=proximity):
+            return index
+    return None
+
+
+def first_visit_already_used(
+    weekly: list[dict[str, Any]],
+    *,
+    side: str,
+    level: float,
+    proximity: float,
+) -> bool:
+    """True when the first 1% test already happened on an earlier week."""
+    classification = classify_weekly_structure(weekly)
+    origin_index = classification.get("origin_index")
+    if (
+        classification.get("side") not in {"gain", "loss"}
+        or origin_index is None
+    ):
+        return True
+    first = first_visit_index(
+        weekly,
+        side=str(classification["side"]),
+        level=float(level),
+        origin_index=int(origin_index),
+        proximity=proximity,
+    )
+    return first is not None and first < len(weekly) - 1
 
 
 def average_volume(daily: list[dict[str, float]], lookback: int = VOLUME_LOOKBACK_DAYS) -> float | None:
@@ -1135,6 +1211,13 @@ def scan_instrument(
     classification = classify_weekly_structure(weekly)
     if classification.get("side") not in {"gain", "loss"}:
         return None
+    if first_visit_already_used(
+        weekly,
+        side=str(classification["side"]),
+        level=float(classification["level"]),
+        proximity=DEFAULT_RETEST_PCT / 100.0,
+    ):
+        return None
     return {
         **instrument,
         **classification,
@@ -1302,6 +1385,25 @@ def evaluate_watchlist(
             print(f"Skipping watch {record.get('symbol')}: {exc}", flush=True)
             continue
         if not is_retest(last_price, float(record["level"]), proximity=proximity):
+            if index + 1 < len(records) and yahoo_delay > 0:
+                time.sleep(yahoo_delay)
+            continue
+        try:
+            weekly, _daily = fetch_weekly_from_yahoo(str(record["chart_symbol"]))
+            weekly = closed_weekly_candles(
+                weekly,
+                market=str(record.get("market") or "us"),
+            )
+        except Exception as exc:
+            failures += 1
+            print(f"Skipping watch {record.get('symbol')}: {exc}", flush=True)
+            continue
+        if first_visit_already_used(
+            weekly,
+            side=str(record["side"]),
+            level=float(record["level"]),
+            proximity=proximity,
+        ):
             if index + 1 < len(records) and yahoo_delay > 0:
                 time.sleep(yahoo_delay)
             continue
