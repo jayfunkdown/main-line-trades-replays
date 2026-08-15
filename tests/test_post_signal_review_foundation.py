@@ -967,6 +967,60 @@ class PostSignalReviewChartHelpersTests(unittest.TestCase):
         self.assertIsNotNone(fraction)
         self.assertAlmostEqual(fraction, 0.83, delta=0.05)
 
+    def test_partial_width_orange_reference_line_is_detected(self):
+        try:
+            from PIL import Image, ImageDraw
+        except ImportError:
+            self.skipTest("Pillow is unavailable")
+
+        image = Image.new("RGB", (1000, 600), "#131722")
+        draw = ImageDraw.Draw(image)
+        left, top, right, bottom = earnings_reactions.tradingview_plot_bounds(
+            1000,
+            600,
+        )
+        plot_width = right - left
+        line_y = int((top + bottom) * 0.72)
+        start_x = left + int(plot_width * 0.78)
+        end_x = right - int(plot_width * 0.05)
+        draw.line((start_x, line_y, end_x, line_y), fill=(255, 152, 0), width=2)
+        premarket_y = top + 20
+        for x in range(left, right, 8):
+            draw.point((x, premarket_y), fill=(251, 140, 0))
+
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        fraction = earnings_reactions.detect_tradingview_reference_line_start_fraction(
+            buffer.getvalue(),
+            6.42,
+        )
+        self.assertIsNotNone(fraction)
+        self.assertAlmostEqual(fraction, 0.78, delta=0.05)
+
+    def test_premarket_dotted_line_is_not_used_for_reference_level(self):
+        try:
+            from PIL import Image, ImageDraw
+        except ImportError:
+            self.skipTest("Pillow is unavailable")
+
+        image = Image.new("RGB", (1000, 600), "#131722")
+        draw = ImageDraw.Draw(image)
+        left, top, right, bottom = earnings_reactions.tradingview_plot_bounds(
+            1000,
+            600,
+        )
+        premarket_y = top + 30
+        for x in range(left, right, 8):
+            draw.point((x, premarket_y), fill=(251, 140, 0))
+
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        fraction = earnings_reactions.detect_tradingview_reference_line_start_fraction(
+            buffer.getvalue(),
+            6.42,
+        )
+        self.assertIsNone(fraction)
+
     def test_default_review_chart_horizon_start_is_fallback(self):
         sent_at = earnings_reactions.parse_iso_datetime(
             "2026-08-14T07:25:34-04:00"

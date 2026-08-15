@@ -1487,7 +1487,276 @@ def infer_tradingview_horizon_date(
 
 
 TRADINGVIEW_SOLID_LINE_MIN_RUN = 50
+TRADINGVIEW_PARTIAL_LINE_MIN_RUN = 12
 TRADINGVIEW_DOTTED_LINE_MAX_RUN = 35
+TRADINGVIEW_REFERENCE_PRICE_Y_BAND = 8
+
+
+def tradingview_plot_label_cutoff(right: int, plot_width: int) -> int:
+    return right - int(plot_width * 0.08)
+
+
+def is_tradingview_candle_pixel(red: int, green: int, blue: int) -> bool:
+    return (
+        abs(red - 126) < 12
+        and abs(green - 87) < 12
+        and abs(blue - 194) < 12
+    )
+
+
+def is_tradingview_reference_line_pixel(red: int, green: int, blue: int) -> bool:
+    if is_tradingview_candle_pixel(red, green, blue):
+        return False
+    return is_tradingview_user_line_pixel(red, green, blue)
+
+
+def tradingview_reference_price_tolerance(reference_level: float) -> float:
+    return max(0.75, reference_level * 0.12)
+
+
+def tradingview_interpolate_y_for_price(
+    points: list[tuple[float, int]],
+    price: float,
+) -> int | None:
+    if len(points) < 2:
+        return None
+
+    if price <= points[0][0]:
+        return points[0][1]
+    if price >= points[-1][0]:
+        return points[-1][1]
+
+    for (price_top, y_top), (price_bottom, y_bottom) in zip(points, points[1:]):
+        if min(price_top, price_bottom) <= price <= max(price_top, price_bottom):
+            if price_top == price_bottom:
+                return y_top
+            ratio = (price - price_top) / (price_bottom - price_top)
+            return int(y_top + ratio * (y_bottom - y_top))
+    return None
+
+
+def tradingview_orange_axis_label_bands(
+    image: Any,
+    left: int,
+    top: int,
+    right: int,
+    bottom: int,
+    width: int,
+) -> list[tuple[int, int]]:
+    pixels = image.load()
+    axis_left = int(width * 0.88)
+    flagged_rows: list[int] = []
+    for y in range(top, bottom):
+        if any(
+            is_tradingview_orange_pixel(*pixels[x, y])
+            for x in range(axis_left, width)
+        ):
+            flagged_rows.append(y)
+
+    if not flagged_rows:
+        return []
+
+    bands: list[tuple[int, int]] = []
+    band_start = flagged_rows[0]
+    previous = flagged_rows[0]
+    for y in flagged_rows[1:]:
+        if y - previous <= 2:
+            previous = y
+            continue
+        bands.append((band_start, previous))
+        band_start = y
+        previous = y
+    bands.append((band_start, previous))
+    return bands
+
+
+def tradingview_row_merged_line_pixels(
+    pixels: Any,
+    y: int,
+    left: int,
+    label_cutoff: int,
+    row_span: int = 2,
+) -> list[int]:
+    xs: set[int] = set()
+    for row_y in range(y - row_span, y + row_span + 1):
+        for x in range(left, label_cutoff):
+            if is_tradingview_reference_line_pixel(*pixels[x, row_y]):
+                xs.add(x)
+    return sorted(xs)
+
+
+def tradingview_is_premarket_orange_band(
+    pixels: Any,
+    y_center: int,
+    left: int,
+    right: int,
+    plot_width: int,
+    label_cutoff: int,
+) -> bool:
+    row = tradingview_row_merged_line_pixels(
+        pixels,
+        y_center,
+        left,
+        label_cutoff,
+        row_span=1,
+    )
+    orange_row = [
+        x
+        for x in range(left, label_cutoff)
+        if is_tradingview_orange_pixel(*pixels[x, y_center])
+    ]
+    candidate = orange_row or row
+    if not candidate:
+        return False
+    return is_tradingview_dotted_horizontal_line(candidate, plot_width)
+
+
+def tradingview_line_record_from_row(
+    y: int,
+    xs: list[int],
+    left: int,
+    plot_width: int,
+    min_run: int,
+    estimated_price: float | None,
+) -> dict[str, Any] | None:
+    if not xs:
+        return None
+    if is_tradingview_dotted_horizontal_line(xs, plot_width):
+        return None
+
+    run_start, run_end, run_length = tradingview_row_earliest_significant_run(
+        xs,
+        min_run,
+    )
+    if run_length < min_run:
+        longest_start, longest_end, longest_length = tradingview_row_longest_run(xs)
+        if longest_length < min_run:
+            return None
+        run_start = longest_start
+        run_end = longest_end
+        run_length = longest_length
+
+    if (
+        run_start <= left + int(plot_width * 0.02)
+        and run_end >= left + int(plot_width * 0.88) - int(plot_width * 0.12)
+        and run_length >= int(plot_width * 0.7)
+    ):
+        return None
+
+    start_x = run_start
+    return {
+        "y": y,
+        "start_x": start_x,
+        "run_start": run_start,
+        "run_end": run_end,
+        "run_length": run_length,
+        "start_fraction": (start_x - left) / plot_width,
+        "estimated_price": estimated_price,
+    }
+
+
+def find_tradingview_reference_line_near_level(
+    image: Any,
+    reference_level: float,
+) -> dict[str, Any] | None:
+    from PIL import Image
+
+    if not isinstance(image, Image.Image):
+        return None
+
+    image = image.convert("RGB")
+    width, height = image.size
+    left, top, right, bottom = tradingview_plot_bounds(width, height)
+    plot_width = right - left
+    if plot_width <= 1:
+        return None
+
+    normalized_level = normalized_reference_level(reference_level)
+    if normalized_level is None:
+        return None
+
+    price_points = tradingview_price_axis_points(image)
+    target_y = tradingview_interpolate_y_for_price(price_points, normalized_level)
+    tolerance = tradingview_reference_price_tolerance(normalized_level)
+    pixels = image.load()
+    label_cutoff = tradingview_plot_label_cutoff(right, plot_width)
+
+    candidate_rows: set[int] = set()
+    if target_y is not None:
+        for row_y in range(
+            target_y - TRADINGVIEW_REFERENCE_PRICE_Y_BAND,
+            target_y + TRADINGVIEW_REFERENCE_PRICE_Y_BAND + 1,
+        ):
+            if top <= row_y < bottom:
+                candidate_rows.add(row_y)
+
+    orange_bands = tradingview_orange_axis_label_bands(
+        image,
+        left,
+        top,
+        right,
+        bottom,
+        width,
+    )
+    non_premarket_bands: list[tuple[int, int, int]] = []
+    for band_start, band_end in orange_bands:
+        band_center = (band_start + band_end) // 2
+        if tradingview_is_premarket_orange_band(
+            pixels,
+            band_center,
+            left,
+            right,
+            plot_width,
+            label_cutoff,
+        ):
+            continue
+        non_premarket_bands.append((band_start, band_end, band_center))
+
+    for band_start, band_end, band_center in non_premarket_bands:
+        band_price = estimate_tradingview_price_at_y(image, band_center)
+        if band_price is not None:
+            if abs(band_price - normalized_level) > tolerance:
+                continue
+        elif target_y is not None:
+            if abs(band_center - target_y) > TRADINGVIEW_REFERENCE_PRICE_Y_BAND:
+                continue
+        elif len(non_premarket_bands) != 1:
+            continue
+        for row_y in range(band_start - 2, band_end + 3):
+            if top <= row_y < bottom:
+                candidate_rows.add(row_y)
+
+    best: dict[str, Any] | None = None
+    for row_y in sorted(candidate_rows):
+        orange_xs: set[int] = set()
+        for scan_y in range(max(top, row_y - 2), min(bottom, row_y + 3)):
+            for x in range(left, right):
+                if is_tradingview_orange_pixel(*pixels[x, scan_y]):
+                    orange_xs.add(x)
+        merged_orange = sorted(orange_xs)
+        estimated_price = estimate_tradingview_price_at_y(image, row_y)
+        xs = merged_orange
+        min_run = TRADINGVIEW_PARTIAL_LINE_MIN_RUN
+        if not xs:
+            continue
+        line = tradingview_line_record_from_row(
+            row_y,
+            xs,
+            left,
+            plot_width,
+            min_run,
+            estimated_price,
+        )
+        if line is None:
+            continue
+        if estimated_price is not None and abs(
+            float(estimated_price) - normalized_level
+        ) > tolerance:
+            continue
+        if best is None or int(line["run_length"]) > int(best["run_length"]):
+            best = line
+
+    return best
 
 
 def tradingview_plot_bounds(width: int, height: int) -> tuple[int, int, int, int]:
@@ -1670,6 +1939,7 @@ def estimate_tradingview_price_at_y(
 
 def find_tradingview_solid_reference_lines(
     image: Any,
+    reference_level: float | None = None,
 ) -> list[dict[str, Any]]:
     from PIL import Image
 
@@ -1682,47 +1952,72 @@ def find_tradingview_solid_reference_lines(
     if plot_width <= 1:
         return []
 
+    normalized_level = normalized_reference_level(reference_level)
+    price_points = tradingview_price_axis_points(image)
+    target_y = (
+        tradingview_interpolate_y_for_price(price_points, normalized_level)
+        if normalized_level is not None
+        else None
+    )
+    tolerance = (
+        tradingview_reference_price_tolerance(normalized_level)
+        if normalized_level is not None
+        else None
+    )
+    label_cutoff = tradingview_plot_label_cutoff(right, plot_width)
+
     row_pixels: dict[int, list[int]] = {}
     pixels = image.load()
     for y in range(top, bottom):
         row = [
             x
-            for x in range(left, right)
-            if is_tradingview_user_line_pixel(*pixels[x, y])
+            for x in range(left, label_cutoff)
+            if is_tradingview_reference_line_pixel(*pixels[x, y])
         ]
         if row:
             row_pixels[y] = row
 
     lines: list[dict[str, Any]] = []
     for y, xs in row_pixels.items():
-        if is_tradingview_dotted_horizontal_line(xs, plot_width):
-            continue
-        run_start, run_end, run_length = tradingview_row_earliest_significant_run(
-            xs,
-            TRADINGVIEW_SOLID_LINE_MIN_RUN,
-        )
-        if run_length < TRADINGVIEW_SOLID_LINE_MIN_RUN:
-            continue
-        if (
-            run_start <= left + int(plot_width * 0.02)
-            and run_end >= right - int(plot_width * 0.12)
-            and run_length >= int(plot_width * 0.7)
-        ):
-            continue
-
-        start_x = run_start
         estimated_price = estimate_tradingview_price_at_y(image, y)
-        lines.append(
-            {
-                "y": y,
-                "start_x": start_x,
-                "run_start": run_start,
-                "run_end": run_end,
-                "run_length": run_length,
-                "start_fraction": (start_x - left) / plot_width,
-                "estimated_price": estimated_price,
-            }
+        near_reference = (
+            normalized_level is not None
+            and estimated_price is not None
+            and tolerance is not None
+            and abs(float(estimated_price) - normalized_level) <= tolerance
+        ) or (
+            target_y is not None
+            and abs(y - target_y) <= TRADINGVIEW_REFERENCE_PRICE_Y_BAND
         )
+        min_run = (
+            TRADINGVIEW_PARTIAL_LINE_MIN_RUN
+            if near_reference
+            else TRADINGVIEW_SOLID_LINE_MIN_RUN
+        )
+        search_rows = [xs]
+        if near_reference:
+            merged = tradingview_row_merged_line_pixels(
+                pixels,
+                y,
+                left,
+                label_cutoff,
+                row_span=2,
+            )
+            if merged:
+                search_rows.append(merged)
+
+        for candidate_xs in search_rows:
+            line = tradingview_line_record_from_row(
+                y,
+                candidate_xs,
+                left,
+                plot_width,
+                min_run,
+                estimated_price,
+            )
+            if line is not None:
+                lines.append(line)
+                break
     return lines
 
 
@@ -1741,11 +2036,19 @@ def detect_tradingview_reference_line_start_fraction(
     except OSError:
         return None
 
-    lines = find_tradingview_solid_reference_lines(image)
+    normalized_level = normalized_reference_level(reference_level)
+    lines = find_tradingview_solid_reference_lines(image, normalized_level)
+    if normalized_level is not None:
+        near_level = find_tradingview_reference_line_near_level(
+            image,
+            normalized_level,
+        )
+        if near_level is not None:
+            lines.append(near_level)
+
     if not lines:
         return None
 
-    normalized_level = normalized_reference_level(reference_level)
     if normalized_level is not None:
         priced_lines = [
             line
@@ -1753,14 +2056,12 @@ def detect_tradingview_reference_line_start_fraction(
             if isinstance(line.get("estimated_price"), Real)
         ]
         if priced_lines:
+            tolerance = tradingview_reference_price_tolerance(normalized_level)
             chosen = min(
                 priced_lines,
                 key=lambda line: abs(float(line["estimated_price"]) - normalized_level),
             )
-            if abs(float(chosen["estimated_price"]) - normalized_level) <= max(
-                0.75,
-                normalized_level * 0.12,
-            ):
+            if abs(float(chosen["estimated_price"]) - normalized_level) <= tolerance:
                 return max(0.0, min(1.0, float(chosen["start_fraction"])))
 
     chosen = max(lines, key=lambda line: int(line["run_length"]))
