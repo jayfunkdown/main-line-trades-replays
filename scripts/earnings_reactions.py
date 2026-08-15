@@ -1677,17 +1677,14 @@ def generate_weekly_chart(
         if isinstance(price, bool) or not isinstance(price, Real) or start_date is None:
             raise ValueError("Chart levels require numeric prices and ISO start dates.")
         level_price = float(price)
-        if review_chart:
-            line_start = 0.0
-        else:
-            line_start = next(
-                (
-                    index
-                    for index, candle in enumerate(weekly)
-                    if candle["date"].date() >= start_date.date()
-                ),
-                len(weekly) - 1,
-            )
+        line_start = next(
+            (
+                index
+                for index, candle in enumerate(weekly)
+                if candle["date"].date() >= start_date.date()
+            ),
+            len(weekly) - 1,
+        )
         ax.hlines(
             level_price,
             line_start,
