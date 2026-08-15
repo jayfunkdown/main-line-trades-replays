@@ -7,8 +7,10 @@ US: Friday 4:00 PM America/New_York through Sunday. Crypto: Monday 00:00 UTC
 once that weekly has printed. Names that gain or lose the weekly are
 admitted to a watchlist. No Discord post.
 
-Step 2 (--watch): every 15 minutes, last price on the watchlist only.
-When price is within 1% of the watched weekly level, post a chart card.
+Step 2 (--watch): hourly last-price check. Names within 5% of the line
+are quoted every hour. The rest rotate in (~200 per hour) so a 1,500–2,000
+name list is fully refreshed about every 8–10 hours. When price is within
+1% of the watched weekly level, post a chart card.
 
 Required for --watch:
     WEEKLY_SCREENER_WEBHOOK
@@ -21,6 +23,8 @@ Optional:
     WEEKLY_SCREENER_SCAN_BATCH_SIZE=400
     WEEKLY_SCREENER_WATCH_EXPIRE_WEEKS=8
     WEEKLY_SCREENER_RETEST_PCT=1
+    WEEKLY_SCREENER_WATCH_NEAR_PCT=5
+    WEEKLY_SCREENER_WATCH_FAR_PER_RUN=200
     COINGECKO_API_KEY
     FINNHUB_API_KEY
 """
@@ -106,6 +110,8 @@ DEFAULT_YAHOO_DELAY = 0.15
 DEFAULT_SCAN_BATCH_SIZE = 400
 DEFAULT_WATCH_EXPIRE_WEEKS = 8
 DEFAULT_RETEST_PCT = 1.0
+DEFAULT_WATCH_NEAR_PCT = 5.0
+DEFAULT_WATCH_FAR_PER_RUN = 200
 VOLUME_LOOKBACK_DAYS = 20
 
 SP500_CSV_URL = (
@@ -1232,6 +1238,8 @@ def admit_watch(state: dict[str, Any], hit: dict[str, Any]) -> bool:
         "week_id": hit["week_id"],
         "level": hit["level"],
         "close": hit.get("close"),
+        "last_price": hit.get("close"),
+        "last_checked_at": eastern_now().isoformat(),
         "level_date": hit.get("level_date"),
         "admitted_at": eastern_now().isoformat(),
     }
@@ -1522,17 +1530,66 @@ def mark_batch_processed(
                 scan["us_completed_week_id"] = market_week_id
 
 
+def watch_stored_price(record: dict[str, Any]) -> float | None:
+    for field in ("last_price", "close"):
+        value = record.get(field)
+        if value is None or value == "":
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def watch_is_near(record: dict[str, Any], near_pct: float) -> bool:
+    price = watch_stored_price(record)
+    if price is None:
+        return False
+    return retest_distance(price, float(record["level"])) <= near_pct
+
+
+def select_watch_fetches(
+    records: list[dict[str, Any]],
+    *,
+    near_pct: float,
+    far_per_run: int,
+    cursor: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """Quote names already near the line every hour; rotate the rest."""
+    near: list[dict[str, Any]] = []
+    far: list[dict[str, Any]] = []
+    for record in records:
+        if watch_is_near(record, near_pct):
+            near.append(record)
+        else:
+            far.append(record)
+    far.sort(key=lambda item: str(item.get("symbol") or ""))
+    if not far or far_per_run <= 0:
+        return near, cursor
+    start = cursor % len(far)
+    rotated = far[start:] + far[:start]
+    chosen_far = rotated[:far_per_run]
+    new_cursor = (start + len(chosen_far)) % len(far)
+    return near + chosen_far, new_cursor
+
+
 def evaluate_watchlist(
     state: dict[str, Any],
     *,
     proximity: float,
     yahoo_delay: float,
-) -> tuple[list[dict[str, Any]], int]:
+    near_pct: float = DEFAULT_WATCH_NEAR_PCT / 100.0,
+    far_per_run: int = DEFAULT_WATCH_FAR_PER_RUN,
+    now: datetime | None = None,
+) -> tuple[list[dict[str, Any]], int, int]:
     hits: list[dict[str, Any]] = []
     failures = 0
+    checked = 0
+    current = now or eastern_now()
     watchlist = state.get("watchlist") or {}
-    records = list(watchlist.values())
-    for index, record in enumerate(records):
+    active: list[dict[str, Any]] = []
+    for record in watchlist.values():
         if not isinstance(record, dict):
             continue
         key = watch_key(record["symbol"], record["side"], float(record["level"]))
@@ -1540,14 +1597,27 @@ def evaluate_watchlist(
             state, str(record["symbol"]), str(record["side"])
         ):
             continue
+        active.append(record)
+    cursor = int(state.get("watch_far_cursor") or 0)
+    to_fetch, new_cursor = select_watch_fetches(
+        active,
+        near_pct=near_pct,
+        far_per_run=far_per_run,
+        cursor=cursor,
+    )
+    state["watch_far_cursor"] = new_cursor
+    for index, record in enumerate(to_fetch):
         try:
             last_price = latest_chart_close(record["chart_symbol"])
         except Exception as exc:
             failures += 1
             print(f"Skipping watch {record.get('symbol')}: {exc}", flush=True)
             continue
+        checked += 1
+        record["last_price"] = last_price
+        record["last_checked_at"] = current.isoformat()
         if not is_retest(last_price, float(record["level"]), proximity=proximity):
-            if index + 1 < len(records) and yahoo_delay > 0:
+            if index + 1 < len(to_fetch) and yahoo_delay > 0:
                 time.sleep(yahoo_delay)
             continue
         try:
@@ -1566,7 +1636,7 @@ def evaluate_watchlist(
             level=float(record["level"]),
             proximity=proximity,
         ):
-            if index + 1 < len(records) and yahoo_delay > 0:
+            if index + 1 < len(to_fetch) and yahoo_delay > 0:
                 time.sleep(yahoo_delay)
             continue
         hits.append(
@@ -1576,9 +1646,9 @@ def evaluate_watchlist(
                 "distance": retest_distance(last_price, float(record["level"])),
             }
         )
-        if index + 1 < len(records) and yahoo_delay > 0:
+        if index + 1 < len(to_fetch) and yahoo_delay > 0:
             time.sleep(yahoo_delay)
-    return hits, failures
+    return hits, failures, checked
 
 
 def seed_watch_hits(state: dict[str, Any], hits: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1702,6 +1772,15 @@ def runtime_settings() -> dict[str, Any]:
             DEFAULT_RETEST_PCT,
         )
         / 100.0,
+        "watch_near_pct": env_float(
+            "WEEKLY_SCREENER_WATCH_NEAR_PCT",
+            DEFAULT_WATCH_NEAR_PCT,
+        )
+        / 100.0,
+        "watch_far_per_run": env_int(
+            "WEEKLY_SCREENER_WATCH_FAR_PER_RUN",
+            DEFAULT_WATCH_FAR_PER_RUN,
+        ),
     }
 
 
@@ -1778,10 +1857,12 @@ def main(argv: list[str] | None = None) -> None:
             hits,
             arguments.preview_limit,
         )
-        watch_hits, watch_failures = evaluate_watchlist(
+        watch_hits, watch_failures, _checked = evaluate_watchlist(
             state,
             proximity=settings["proximity"],
             yahoo_delay=settings["yahoo_delay"],
+            near_pct=settings["watch_near_pct"],
+            far_per_run=settings["watch_far_per_run"],
         )
         print()
         print_preview_list(
@@ -1835,11 +1916,14 @@ def main(argv: list[str] | None = None) -> None:
         now_week_id=week_id,
         expire_weeks=settings["expire_weeks"],
     )
-    hits, failures = evaluate_watchlist(
+    hits, failures, checked = evaluate_watchlist(
         state,
         proximity=settings["proximity"],
         yahoo_delay=settings["yahoo_delay"],
+        near_pct=settings["watch_near_pct"],
+        far_per_run=settings["watch_far_per_run"],
     )
+    save_state_locked(state)
 
     if not state.get("seeded"):
         state = seed_watch_hits(state, hits)
@@ -1893,6 +1977,7 @@ def main(argv: list[str] | None = None) -> None:
 
     print(
         f"Weekly screener watch complete for {date_label}: "
+        f"{checked} priced, "
         f"{len(hits)} retest hits, "
         f"{posted_count} posted, "
         f"{failures} skipped."

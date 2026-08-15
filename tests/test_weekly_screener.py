@@ -699,7 +699,7 @@ class WeeklyScreenerRunTests(unittest.TestCase):
             ), patch.object(
                 weekly_screener,
                 "evaluate_watchlist",
-                return_value=([], 0),
+                return_value=([], 0, 0),
             ), patch.object(
                 weekly_screener,
                 "send_discord_message",
@@ -984,7 +984,78 @@ class WeeklyScreenerRunTests(unittest.TestCase):
         self.assertIn("Fri *-*-* 16:30:00 America/New_York", scan_timer)
         self.assertIn("Mon *-*-* 00..12:00:00 UTC", scan_timer)
         self.assertIn("scripts/weekly_screener.py --watch", watch_service)
-        self.assertIn("00,15,30,45:00 America/New_York", watch_timer)
+        self.assertIn("*:30:00 America/New_York", watch_timer)
+
+    def test_watch_quotes_near_names_every_pass_and_rotates_far_names(self):
+        near = sample_watch("AAPL", "gain", 12.0)
+        near["last_price"] = 12.40
+        far_a = sample_watch("IBM", "loss", 20.0)
+        far_a["last_price"] = 40.0
+        far_b = sample_watch("MSFT", "loss", 20.0)
+        far_b["last_price"] = 30.0
+        records = [near, far_a, far_b]
+        first, cursor = weekly_screener.select_watch_fetches(
+            records,
+            near_pct=0.05,
+            far_per_run=1,
+            cursor=0,
+        )
+        first_symbols = [item["symbol"] for item in first]
+        self.assertIn("AAPL", first_symbols)
+        self.assertEqual(len(first_symbols), 2)
+        second, _cursor = weekly_screener.select_watch_fetches(
+            records,
+            near_pct=0.05,
+            far_per_run=1,
+            cursor=cursor,
+        )
+        first_far = set(first_symbols) - {"AAPL"}
+        second_far = set(item["symbol"] for item in second) - {"AAPL"}
+        self.assertEqual(len(second_far), 1)
+        self.assertNotEqual(first_far, second_far)
+        self.assertIn("AAPL", [item["symbol"] for item in second])
+
+    def test_watch_does_not_yahoo_fetch_far_names_outside_this_hour(self):
+        near = sample_watch("AAPL", "gain", 12.0)
+        near["last_price"] = 12.40
+        far = sample_watch("MSFT", "loss", 20.0)
+        far["last_price"] = 30.0
+        state = weekly_screener.empty_state()
+        state["watchlist"] = {
+            weekly_screener.watch_key("AAPL", "gain", 12.0): near,
+            weekly_screener.watch_key("MSFT", "loss", 20.0): far,
+        }
+        fetched = []
+
+        def last_price(symbol):
+            fetched.append(symbol)
+            return 12.05 if symbol == "AAPL" else 30.0
+
+        with patch.object(
+            weekly_screener,
+            "latest_chart_close",
+            side_effect=last_price,
+        ), patch.object(
+            weekly_screener,
+            "fetch_weekly_from_yahoo",
+            return_value=(lnsr_style_gain(close=8.27), SAMPLE_DAILY),
+        ), patch.object(
+            weekly_screener,
+            "first_visit_already_used",
+            return_value=False,
+        ):
+            hits, failures, checked = weekly_screener.evaluate_watchlist(
+                state,
+                proximity=0.01,
+                yahoo_delay=0,
+                near_pct=0.05,
+                far_per_run=0,
+            )
+        self.assertEqual(fetched, ["AAPL"])
+        self.assertEqual(failures, 0)
+        self.assertEqual(checked, 1)
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["symbol"], "AAPL")
 
 
 if __name__ == "__main__":

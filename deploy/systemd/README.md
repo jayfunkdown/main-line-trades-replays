@@ -54,8 +54,10 @@ deploy/systemd/mainline-weekly-screener-watch.timer
 `--scan` admits a gained or lost weekly to a watchlist with no Discord post.
 US batches run Friday 4:30 PM ET through Sunday. Crypto batches run after
 Monday 00:00 UTC, when that weekly has printed. `--watch` posts to
-`WEEKLY_SCREENER_WEBHOOK` on the **first** 1% test of that body (every 15
-minutes). There is no daily card limit. Public beta from day one — no
+`WEEKLY_SCREENER_WEBHOOK` on the **first** 1% test of that body. Watch
+runs hourly: names within 5% of the line every hour, the rest ~200 per
+hour so a 1,500–2,000 name list refreshes about every 8–10 hours. There
+is no daily card limit. Public beta from day one — no
 private review queue. An empty `data/weekly_screener_state.json` seeds
 current hits without posting; do not reset that file casually.
 
