@@ -808,7 +808,7 @@ class PostSignalReviewChartHelpersTests(unittest.TestCase):
             )
         return weekly
 
-    def test_infer_tradingview_horizon_date_reads_september_2022(self):
+    def test_infer_tradingview_horizon_date_reads_september_2021(self):
         words = [
             ("Sep", 112, 96.0),
             ("Nov", 234, 96.0),
@@ -825,7 +825,43 @@ class PostSignalReviewChartHelpersTests(unittest.TestCase):
             words,
             sent_at,
         )
-        self.assertEqual(horizon.isoformat(), "2022-09-01")
+        self.assertEqual(horizon.isoformat(), "2021-09-01")
+
+    def test_infer_tradingview_horizon_date_reads_month_after_year_label(self):
+        words = [
+            ("2022", 50, 96.0),
+            ("Mar", 200, 96.0),
+            ("May", 300, 96.0),
+        ]
+        sent_at = earnings_reactions.parse_iso_datetime(
+            "2026-08-14T07:25:34-04:00"
+        )
+        horizon = earnings_reactions.infer_tradingview_horizon_date(
+            words,
+            sent_at,
+        )
+        self.assertEqual(horizon.isoformat(), "2022-03-01")
+
+    def test_infer_tradingview_horizon_date_reads_short_year_flip_labels(self):
+        words = [
+            ("Sep", 112, 96.0),
+            ("Nov", 234, 96.0),
+            ("22", 366, 96.0),
+            ("Mar", 511, 96.0),
+            ("May", 650, 96.0),
+            ("Jun", 720, 96.0),
+            ("Sep", 900, 96.0),
+            ("Nov", 1020, 96.0),
+            ("23", 1166, 96.0),
+        ]
+        sent_at = earnings_reactions.parse_iso_datetime(
+            "2026-08-14T07:25:34-04:00"
+        )
+        horizon = earnings_reactions.infer_tradingview_horizon_date(
+            words,
+            sent_at,
+        )
+        self.assertEqual(horizon.isoformat(), "2021-09-01")
 
     def test_detect_review_chart_horizon_start_uses_original_axis(self):
         try:
@@ -856,15 +892,15 @@ class PostSignalReviewChartHelpersTests(unittest.TestCase):
             sent_at,
         )
         self.assertIsNotNone(horizon)
-        self.assertEqual(horizon.date().isoformat(), "2022-09-01")
+        self.assertEqual(horizon.date().isoformat(), "2021-09-01")
 
-    def test_weekly_candles_from_horizon_starts_at_september_2022(self):
-        weekly = self.build_weekly("2022-02-07", 230, base=1.0)
-        horizon = earnings_reactions.parse_iso_datetime("2022-09-01T00:00:00-04:00")
+    def test_weekly_candles_from_horizon_starts_at_september_2021(self):
+        weekly = self.build_weekly("2021-02-08", 280, base=1.0)
+        horizon = earnings_reactions.parse_iso_datetime("2021-09-01T00:00:00-04:00")
 
         sliced = earnings_reactions.weekly_candles_from_horizon(weekly, horizon)
 
-        self.assertEqual(sliced[0]["date"].date().isoformat(), "2022-09-05")
+        self.assertEqual(sliced[0]["date"].date().isoformat(), "2021-09-06")
         self.assertLess(len(sliced), len(weekly))
 
     def test_default_review_chart_horizon_start_is_fallback(self):

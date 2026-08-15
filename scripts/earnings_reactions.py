@@ -1412,57 +1412,78 @@ def tradingview_year_number(text: str) -> int | None:
     match = re.fullmatch(r"(20\d{2})", token)
     if match:
         return int(match.group(1))
-    match = re.fullmatch(r"['’`]?(\d{2})", token)
+    match = re.fullmatch(r"(\d{2})", token)
     if match:
-        return 2000 + int(match.group(1))
+        short_year = int(match.group(1))
+        if 19 <= short_year <= 39:
+            return 2000 + short_year
     return None
 
 
-def infer_tradingview_horizon_date(
+def tradingview_axis_timeline(
     words: list[tuple[str, int, float]],
-    sent_at: datetime,
-) -> date | None:
-    filtered: list[tuple[str, int]] = []
+) -> list[tuple[str, int, int]]:
+    timeline: list[tuple[str, int, int]] = []
     for text, left, _confidence in words:
         token = normalized_tradingview_axis_token(text)
         if token in {"tradingview", "www.tradingview.com"}:
             continue
         if re.fullmatch(r"-?\d+\.\d+", token):
             continue
-        filtered.append((text, left))
+        month = tradingview_month_number(text)
+        if month is not None:
+            timeline.append(("month", month, left))
+            continue
+        year = tradingview_year_number(text)
+        if year is not None:
+            timeline.append(("year", year, left))
+    return sorted(timeline, key=lambda item: item[2])
+
+
+def infer_tradingview_horizon_date(
+    words: list[tuple[str, int, float]],
+    _sent_at: datetime,
+) -> date | None:
+    timeline = tradingview_axis_timeline(words)
+    if not timeline:
+        return None
 
     first_month: int | None = None
     first_month_left: int | None = None
-    for text, left in filtered:
-        month = tradingview_month_number(text)
-        if month is not None:
-            first_month = month
+    for kind, value, left in timeline:
+        if kind == "month":
+            first_month = value
             first_month_left = left
             break
 
     if first_month is None:
-        for text, _left in filtered:
-            year = tradingview_year_number(text)
-            if year is not None:
-                return date(year, 1, 1)
+        for kind, value, _left in timeline:
+            if kind == "year":
+                return date(value, 1, 1)
         return None
 
-    first_year: int | None = None
-    for text, left in filtered:
-        if first_month_left is not None and left <= first_month_left:
+    active_year: int | None = None
+    for kind, value, left in timeline:
+        if kind == "year":
+            active_year = value
             continue
-        year = tradingview_year_number(text)
-        if year is not None:
-            first_year = year
-            break
+        if kind != "month" or left != first_month_left or value != first_month:
+            continue
+        if active_year is None:
+            next_year = next(
+                (year for entry_kind, year, year_left in timeline
+                 if entry_kind == "year" and year_left > left),
+                None,
+            )
+            if next_year is None:
+                return None
+            # TradingView prints months chronologically, then a year label at
+            # the calendar flip (Sep, Nov, 22, Mar, ...). Months before that
+            # flip belong to the previous calendar year.
+            return date(next_year - 1, first_month, 1)
+        return date(active_year, first_month, 1)
 
-    if first_year is None:
-        return None
-
-    horizon = date(first_year, first_month, 1)
-    if horizon > sent_at.date():
-        horizon = date(first_year - 1, first_month, 1)
-    return horizon
+    return None
 
 
 def detect_review_chart_horizon_start(
