@@ -1,5 +1,6 @@
 import copy
 import asyncio
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -807,23 +808,66 @@ class PostSignalReviewChartHelpersTests(unittest.TestCase):
             )
         return weekly
 
-    def test_calendar_months_before_clamps_month_end(self):
-        horizon = earnings_reactions.calendar_months_before(
-            "2026-08-14T07:25:34-04:00",
-            earnings_reactions.POST_SIGNAL_REVIEW_CHART_LOOKBACK_MONTHS,
+    def test_infer_tradingview_horizon_date_reads_september_2022(self):
+        words = [
+            ("Sep", 112, 96.0),
+            ("Nov", 234, 96.0),
+            ("2022", 366, 96.0),
+            ("Mar", 511, 96.0),
+            ("Jul", 777, 94.0),
+            ("Nov", 1051, 97.0),
+            ("2023", 1166, 96.0),
+        ]
+        sent_at = earnings_reactions.parse_iso_datetime(
+            "2026-08-14T07:25:34-04:00"
         )
-        self.assertEqual(horizon.isoformat(), "2024-09-14T07:25:34-04:00")
+        horizon = earnings_reactions.infer_tradingview_horizon_date(
+            words,
+            sent_at,
+        )
+        self.assertEqual(horizon.isoformat(), "2022-09-01")
 
-    def test_weekly_candles_from_horizon_starts_at_september_2024(self):
-        weekly = self.build_weekly("2024-02-05", 130, base=1.0)
-        horizon = earnings_reactions.parse_iso_datetime("2024-09-14T07:25:34-04:00")
+    def test_detect_review_chart_horizon_start_uses_original_axis(self):
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+            import pytesseract
+        except ImportError:
+            self.skipTest("Pillow or pytesseract is unavailable")
+        try:
+            pytesseract.get_tesseract_version()
+        except pytesseract.TesseractNotFoundError:
+            self.skipTest("Tesseract OCR is unavailable")
+
+        image = Image.new("RGB", (900, 500), "#131722")
+        draw = ImageDraw.Draw(image)
+        font = ImageFont.load_default()
+        draw.text((40, 450), "Sep", fill="#787B86", font=font)
+        draw.text((140, 450), "Nov", fill="#787B86", font=font)
+        draw.text((240, 450), "2022", fill="#787B86", font=font)
+        draw.text((340, 450), "Mar", fill="#787B86", font=font)
+
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        sent_at = earnings_reactions.parse_iso_datetime(
+            "2026-08-14T07:25:34-04:00"
+        )
+        horizon = earnings_reactions.detect_review_chart_horizon_start(
+            buffer.getvalue(),
+            sent_at,
+        )
+        self.assertIsNotNone(horizon)
+        self.assertEqual(horizon.date().isoformat(), "2022-09-01")
+
+    def test_weekly_candles_from_horizon_starts_at_september_2022(self):
+        weekly = self.build_weekly("2022-02-07", 230, base=1.0)
+        horizon = earnings_reactions.parse_iso_datetime("2022-09-01T00:00:00-04:00")
 
         sliced = earnings_reactions.weekly_candles_from_horizon(weekly, horizon)
 
-        self.assertEqual(sliced[0]["date"].date().isoformat(), "2024-09-16")
+        self.assertEqual(sliced[0]["date"].date().isoformat(), "2022-09-05")
         self.assertLess(len(sliced), len(weekly))
 
-    def test_default_review_chart_horizon_start_matches_signal_span(self):
+    def test_default_review_chart_horizon_start_is_fallback(self):
         sent_at = earnings_reactions.parse_iso_datetime(
             "2026-08-14T07:25:34-04:00"
         )

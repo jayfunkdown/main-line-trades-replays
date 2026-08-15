@@ -33,3 +33,9 @@ The units assume the repository is at
 `/home/jason/main-line-trades-replays` with its virtual environment at
 `.venv/`. Secrets remain in the project's untracked `.env` file and must not be
 added to these unit files.
+
+Post-signal review chart OCR also requires the system package:
+
+```bash
+sudo apt-get install -y tesseract-ocr
+```

@@ -76,7 +76,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, AsyncIterator, Callable
 from zoneinfo import ZoneInfo
 
@@ -112,6 +112,20 @@ YAHOO_CHART_BASE = "https://query1.finance.yahoo.com/v8/finance/chart"
 WEEKLY_CHART_WEEKS = 52
 POST_SIGNAL_REVIEW_CHART_LOOKBACK_MONTHS = 23
 POST_SIGNAL_REVIEW_CHART_MAX_WEEKS = 260
+TRADINGVIEW_MONTH_ABBREVIATIONS = {
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "may": 5,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "oct": 10,
+    "nov": 11,
+    "dec": 12,
+}
 
 SIGNAL_DELIVERY_READY = "ready"
 SIGNAL_DELIVERY_SENDING = "sending"
@@ -1311,11 +1325,174 @@ def calendar_months_before(value: Any, months: int) -> datetime:
 
 
 def default_review_chart_horizon_start(sent_at: datetime) -> datetime:
-    """Match the typical weekly signal chart span ending at send time."""
+    """Fallback when the original chart axis cannot be read."""
     return calendar_months_before(
         sent_at.isoformat(),
         POST_SIGNAL_REVIEW_CHART_LOOKBACK_MONTHS,
     )
+
+
+def tradingview_axis_crop(image: Any) -> Any:
+    width, height = image.size
+    return image.crop(
+        (
+            0,
+            int(height * 0.82),
+            width,
+            height,
+        )
+    )
+
+
+def preprocess_tradingview_axis_crop(crop: Any) -> Any:
+    from PIL import Image, ImageOps
+
+    gray = crop.convert("L")
+    enhanced = ImageOps.autocontrast(gray, cutoff=2)
+    scale = 2
+    return enhanced.resize(
+        (enhanced.size[0] * scale, enhanced.size[1] * scale),
+        Image.Resampling.LANCZOS,
+    )
+
+
+def ocr_tradingview_axis_words(crop: Any) -> list[tuple[str, int, float]]:
+    import pytesseract
+
+    prepared = preprocess_tradingview_axis_crop(crop)
+    data = pytesseract.image_to_data(
+        prepared,
+        output_type=pytesseract.Output.DICT,
+        config="--psm 6",
+    )
+    words: list[tuple[str, int, float]] = []
+    for index, text in enumerate(data.get("text", [])):
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            continue
+        try:
+            confidence = float(data["conf"][index])
+        except (KeyError, TypeError, ValueError):
+            confidence = -1.0
+        if confidence >= 0 and confidence < 25:
+            continue
+        words.append(
+            (
+                cleaned,
+                int(data["left"][index]),
+                confidence,
+            )
+        )
+    return sorted(words, key=lambda item: item[1])
+
+
+def normalized_tradingview_axis_token(text: str) -> str:
+    return (
+        text.strip()
+        .lower()
+        .replace("’", "'")
+        .replace("`", "'")
+    )
+
+
+def tradingview_month_number(text: str) -> int | None:
+    token = normalized_tradingview_axis_token(text)
+    if token in TRADINGVIEW_MONTH_ABBREVIATIONS:
+        return TRADINGVIEW_MONTH_ABBREVIATIONS[token]
+    match = re.fullmatch(r"([a-z]{3})['’`]?\s*(\d{2})", token)
+    if match:
+        month = TRADINGVIEW_MONTH_ABBREVIATIONS.get(match.group(1))
+        if month is not None:
+            return month
+    return None
+
+
+def tradingview_year_number(text: str) -> int | None:
+    token = normalized_tradingview_axis_token(text)
+    match = re.fullmatch(r"(20\d{2})", token)
+    if match:
+        return int(match.group(1))
+    match = re.fullmatch(r"['’`]?(\d{2})", token)
+    if match:
+        return 2000 + int(match.group(1))
+    return None
+
+
+def infer_tradingview_horizon_date(
+    words: list[tuple[str, int, float]],
+    sent_at: datetime,
+) -> date | None:
+    filtered: list[tuple[str, int]] = []
+    for text, left, _confidence in words:
+        token = normalized_tradingview_axis_token(text)
+        if token in {"tradingview", "www.tradingview.com"}:
+            continue
+        if re.fullmatch(r"-?\d+\.\d+", token):
+            continue
+        filtered.append((text, left))
+
+    first_month: int | None = None
+    first_month_left: int | None = None
+    for text, left in filtered:
+        month = tradingview_month_number(text)
+        if month is not None:
+            first_month = month
+            first_month_left = left
+            break
+
+    if first_month is None:
+        for text, _left in filtered:
+            year = tradingview_year_number(text)
+            if year is not None:
+                return date(year, 1, 1)
+        return None
+
+    first_year: int | None = None
+    for text, left in filtered:
+        if first_month_left is not None and left <= first_month_left:
+            continue
+        year = tradingview_year_number(text)
+        if year is not None:
+            first_year = year
+            break
+
+    if first_year is None:
+        return None
+
+    horizon = date(first_year, first_month, 1)
+    if horizon > sent_at.date():
+        horizon = date(first_year - 1, first_month, 1)
+    return horizon
+
+
+def detect_review_chart_horizon_start(
+    chart_bytes: bytes,
+    sent_at: datetime,
+) -> datetime | None:
+    if sent_at.tzinfo is None:
+        raise ValueError("Signal sent_at must be timezone-aware.")
+
+    try:
+        from PIL import Image
+
+        import pytesseract
+    except ImportError:
+        return None
+
+    try:
+        image = Image.open(io.BytesIO(chart_bytes)).convert("RGB")
+        crop = tradingview_axis_crop(image)
+        words = ocr_tradingview_axis_words(crop)
+        horizon_date = infer_tradingview_horizon_date(words, sent_at)
+        if horizon_date is None:
+            return None
+        return datetime.combine(
+            horizon_date,
+            datetime.min.time(),
+            tzinfo=sent_at.tzinfo,
+        )
+    except (OSError, pytesseract.TesseractNotFoundError, RuntimeError, ValueError):
+        return None
 
 
 def weekly_candles_from_horizon(
@@ -4673,6 +4850,15 @@ async def run_review_button_bot() -> None:
                 record["symbol"],
             )
             record["current_price"] = current_price
+            sent_at = parse_iso_datetime(record["sent_at"])
+            chart_horizon_start_at = detect_review_chart_horizon_start(
+                original_chart_bytes,
+                sent_at,
+            )
+            if chart_horizon_start_at is None:
+                chart_horizon_start_at = default_review_chart_horizon_start(
+                    sent_at
+                )
             chart_path = temporary_weekly_chart_path(record["symbol"])
             chart_path = await asyncio.to_thread(
                 generate_weekly_chart,
@@ -4682,16 +4868,14 @@ async def run_review_button_bot() -> None:
                     [
                         {
                             "price": record["reference_level"],
-                            "start_date": parse_iso_datetime(record["sent_at"]).date().isoformat(),
+                            "start_date": sent_at.date().isoformat(),
                         }
                     ]
                     if normalized_reference_level(record.get("reference_level")) is not None
                     else None
                 ),
                 review_chart=True,
-                chart_horizon_start_at=default_review_chart_horizon_start(
-                    parse_iso_datetime(record["sent_at"])
-                ),
+                chart_horizon_start_at=chart_horizon_start_at,
             )
             draft_channel = client.get_channel(signal_review_drafts_channel_id)
             if draft_channel is None:
