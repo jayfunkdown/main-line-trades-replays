@@ -11,6 +11,20 @@ with patch("dotenv.load_dotenv"):
     from scripts import trump_filter
 
 
+class RetiredPostModeTests(unittest.TestCase):
+    def test_post_mode_exits_without_posting_or_state_changes(self):
+        output = StringIO()
+
+        with (
+            patch.object(sys, "argv", ["trump_filter.py", "--post"]),
+            redirect_stdout(output),
+        ):
+            result = trump_filter.main()
+
+        self.assertEqual(result, 0)
+        self.assertIn("retired", output.getvalue().lower())
+
+
 class OversizedMessageTests(unittest.TestCase):
     def setUp(self):
         self.message = {
@@ -20,42 +34,7 @@ class OversizedMessageTests(unittest.TestCase):
             "embeds": [],
         }
 
-    def test_post_mode_marks_oversized_message_without_posting(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            state_path = Path(temp_dir) / "trump_processed.json"
-            state_path.write_text("[]\n", encoding="utf-8")
-            output = StringIO()
-
-            with (
-                patch.object(trump_filter, "STATE_PATH", state_path),
-                patch.object(
-                    trump_filter,
-                    "required_env",
-                    side_effect=lambda name: name,
-                ),
-                patch.object(
-                    trump_filter,
-                    "get_recent_messages",
-                    return_value=[self.message],
-                ),
-                patch.object(
-                    trump_filter,
-                    "post_to_public_channel",
-                ) as post_message,
-                patch.object(sys, "argv", ["trump_filter.py", "--post"]),
-                redirect_stdout(output),
-            ):
-                result = trump_filter.main()
-
-            self.assertEqual(result, 0)
-            post_message.assert_not_called()
-            self.assertEqual(
-                json.loads(state_path.read_text(encoding="utf-8")),
-                [self.message["id"]],
-            )
-            self.assertIn("oversized item(s)", output.getvalue())
-
-    def test_preview_mode_does_not_change_state(self):
+    def test_preview_mode_reports_oversized_message_without_state_change(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / "trump_processed.json"
             output = StringIO()

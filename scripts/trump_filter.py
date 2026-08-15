@@ -36,6 +36,11 @@ POST_DELAY_SECONDS = 2.0
 MAX_POST_ATTEMPTS = 4
 DISCORD_CONTENT_LIMIT = 2000
 
+RETIRED_MESSAGE = (
+    "Truth Social / Trump filter automation is retired. "
+    "The staff raw channel and public Truth Social channel were removed."
+)
+
 IMAGE_EXTENSIONS = (
     ".png",
     ".jpg",
@@ -609,8 +614,8 @@ def post_to_public_channel(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Filter Truth Social raw-channel posts "
-            "and publish cleaned items."
+            "Legacy Truth Social raw-channel filter "
+            "(public posting retired)."
         )
     )
 
@@ -667,6 +672,10 @@ def main() -> int:
         parser.print_help()
         return 0
 
+    if args.post:
+        print(RETIRED_MESSAGE)
+        return 0
+
     if args.limit < 1:
         parser.error("--limit must be at least 1")
 
@@ -682,13 +691,6 @@ def main() -> int:
         "TRUMP_RAW_CHANNEL_ID"
     )
 
-    webhook_url = ""
-
-    if args.post:
-        webhook_url = required_env(
-            "TRUMP_WEBHOOK"
-        )
-
     messages = get_recent_messages(
         bot_token,
         raw_channel_id,
@@ -700,26 +702,10 @@ def main() -> int:
         key=lambda item: int(item["id"]),
     )
 
-    state_exists = STATE_PATH.exists()
     processed_ids = load_processed_ids()
     processed_set = set(processed_ids)
 
-    if args.post and not state_exists:
-        initial_ids = [
-            str(message["id"])
-            for message in messages
-        ]
-
-        save_processed_ids(initial_ids)
-
-        print(
-            f"Initialized with {len(initial_ids)} "
-            "existing raw message(s). Nothing posted."
-        )
-        return 0
-
     checked = 0
-    posted = 0
     previewed = 0
     skipped_empty = 0
     skipped_oversized = 0
@@ -755,13 +741,6 @@ def main() -> int:
         if not cleaned_text and not image_urls:
             skipped_empty += 1
 
-            if args.post:
-                mark_processed(
-                    message_id,
-                    processed_ids,
-                    processed_set,
-                )
-
             print(
                 f"Skipped message {message_id}: empty item."
             )
@@ -775,13 +754,6 @@ def main() -> int:
         if len(public_message) > DISCORD_CONTENT_LIMIT:
             skipped_oversized += 1
 
-            if args.post:
-                mark_processed(
-                    message_id,
-                    processed_ids,
-                    processed_set,
-                )
-
             print(
                 f"Skipped message {message_id}: content is "
                 f"{len(public_message)} characters; Discord's "
@@ -789,66 +761,35 @@ def main() -> int:
             )
             continue
 
-        if args.preview:
-            previewed += 1
-            image_lines = "\n".join(
-                f"Image {index + 1}: {url}"
-                for index, url in enumerate(image_urls)
-            )
-
-            if not image_lines:
-                image_lines = "Images: none"
-
-            print(
-                "\n"
-                "===== TRUTH SOCIAL PREVIEW =====\n"
-                f"Message ID: {message_id}\n"
-                f"{public_message}\n"
-                f"{image_lines}\n"
-                "================================\n"
-            )
-            continue
-
-        post_to_public_channel(
-            webhook_url,
-            public_message,
-            image_urls,
+        previewed += 1
+        image_lines = "\n".join(
+            f"Image {index + 1}: {url}"
+            for index, url in enumerate(image_urls)
         )
 
-        posted += 1
-
-        mark_processed(
-            message_id,
-            processed_ids,
-            processed_set,
-        )
+        if not image_lines:
+            image_lines = "Images: none"
 
         print(
-            "Posted Truth Social item from "
-            f"message {message_id} with "
-            f"{len(image_urls)} image(s)."
+            "\n"
+            "===== TRUTH SOCIAL PREVIEW =====\n"
+            f"Message ID: {message_id}\n"
+            f"{public_message}\n"
+            f"{image_lines}\n"
+            "================================\n"
         )
-
-        time.sleep(POST_DELAY_SECONDS)
-
-    action_text = (
-        f"previewed {previewed}"
-        if args.preview
-        else f"posted {posted}"
-    )
 
     print(
         f"Finished. Checked {checked}, "
-        f"{action_text}, and skipped "
+        f"previewed {previewed}, and skipped "
         f"{skipped_empty} empty and "
         f"{skipped_oversized} oversized item(s)."
     )
 
-    if args.preview:
-        print(
-            "Preview mode did not post anything "
-            "or change the processed-state file."
-        )
+    print(
+        "Preview mode did not post anything "
+        "or change the processed-state file."
+    )
 
     return 0
 

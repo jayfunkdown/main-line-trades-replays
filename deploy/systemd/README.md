@@ -13,8 +13,6 @@ sudo systemctl enable --now \
   mainline-earnings-post.timer \
   mainline-market-wrap.timer \
   mainline-morning-brief.timer \
-  mainline-trendspider.timer \
-  mainline-trump-filter.timer \
   mainline-weekly-calendar.timer \
   mainline-youtube-training.timer \
   mainline-youtube-video-intel.timer \
@@ -27,6 +25,18 @@ Verify the deployment:
 systemctl list-timers --all | grep mainline
 systemctl --failed | grep mainline || true
 systemctl status mainline-earnings-review.service --no-pager
+```
+
+Retired timers (disable on production if still enabled):
+
+```bash
+sudo systemctl disable --now mainline-trendspider.timer
+sudo systemctl disable --now mainline-trump-filter.timer
+sudo rm -f /etc/systemd/system/mainline-trendspider.service \
+             /etc/systemd/system/mainline-trendspider.timer \
+             /etc/systemd/system/mainline-trump-filter.service \
+             /etc/systemd/system/mainline-trump-filter.timer
+sudo systemctl daemon-reload
 ```
 
 The units assume the repository is at

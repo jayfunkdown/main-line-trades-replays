@@ -72,8 +72,6 @@ data/
 
 Future automations:
 
-- TrendSpider formatter
-- Trump formatter
 - Daily Watchlist
 - Weekly Market Recap
 - Market Dashboard

@@ -35,6 +35,12 @@ MAX_STATE_IDS = 500
 POST_DELAY_SECONDS = 2.0
 MAX_POST_ATTEMPTS = 4
 
+RETIRED_MESSAGE = (
+    "TrendSpider public chart forwarding is retired. "
+    "The charts public channel and filter automation were removed. "
+    "TrendSpider raw posts remain visible in Discord without this script."
+)
+
 PROMOTIONAL_PHRASES = (
     "webinar",
     "register now",
@@ -533,8 +539,8 @@ def post_to_public_channel(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Filter TrendSpider raw-channel posts "
-            "and publish qualifying charts."
+            "Legacy TrendSpider raw-channel filter "
+            "(public chart forwarding retired)."
         )
     )
 
@@ -591,6 +597,10 @@ def main() -> int:
         parser.print_help()
         return 0
 
+    if args.post:
+        print(RETIRED_MESSAGE)
+        return 0
+
     if args.limit < 1:
         parser.error("--limit must be at least 1")
 
@@ -606,13 +616,6 @@ def main() -> int:
         "TRENDSPIDER_RAW_CHANNEL_ID"
     )
 
-    webhook_url = ""
-
-    if args.post:
-        webhook_url = required_env(
-            "TRENDSPIDER_WEBHOOK"
-        )
-
     messages = get_recent_messages(
         bot_token,
         raw_channel_id,
@@ -624,26 +627,10 @@ def main() -> int:
         key=lambda item: int(item["id"]),
     )
 
-    state_exists = STATE_PATH.exists()
     processed_ids = load_processed_ids()
     processed_set = set(processed_ids)
 
-    if args.post and not state_exists:
-        initial_ids = [
-            str(message["id"])
-            for message in messages
-        ]
-
-        save_processed_ids(initial_ids)
-
-        print(
-            f"Initialized with {len(initial_ids)} "
-            "existing raw message(s). Nothing posted."
-        )
-        return 0
-
     checked = 0
-    posted = 0
     previewed = 0
     skipped_no_image = 0
     skipped_promotional = 0
@@ -673,13 +660,6 @@ def main() -> int:
         if not image_urls:
             skipped_no_image += 1
 
-            if args.post:
-                mark_processed(
-                    message_id,
-                    processed_ids,
-                    processed_set,
-                )
-
             print(
                 f"Skipped message {message_id}: "
                 "no image."
@@ -688,13 +668,6 @@ def main() -> int:
 
         if is_promotional(text):
             skipped_promotional += 1
-
-            if args.post:
-                mark_processed(
-                    message_id,
-                    processed_ids,
-                    processed_set,
-                )
 
             print(
                 f"Skipped message {message_id}: "
@@ -712,58 +685,28 @@ def main() -> int:
             original_url,
         )
 
-        if args.preview:
-            previewed += 1
-            print(
-                "\n"
-                "===== TRENDSPIDER PREVIEW =====\n"
-                f"Message ID: {message_id}\n"
-                f"{public_message}\n"
-                f"Image: {image_urls[0]}\n"
-                "================================\n"
-            )
-            continue
-
-        post_to_public_channel(
-            webhook_url,
-            public_message,
-            image_urls[0],
-        )
-
-        posted += 1
-
-        mark_processed(
-            message_id,
-            processed_ids,
-            processed_set,
-        )
-
+        previewed += 1
         print(
-            "Posted TrendSpider chart from "
-            f"message {message_id}."
+            "\n"
+            "===== TRENDSPIDER PREVIEW =====\n"
+            f"Message ID: {message_id}\n"
+            f"{public_message}\n"
+            f"Image: {image_urls[0]}\n"
+            "================================\n"
         )
-
-        time.sleep(POST_DELAY_SECONDS)
-
-    action_text = (
-        f"previewed {previewed}"
-        if args.preview
-        else f"posted {posted}"
-    )
 
     print(
         f"Finished. Checked {checked}, "
-        f"{action_text}, "
+        f"previewed {previewed}, "
         f"skipped {skipped_no_image} without images, "
         f"and skipped {skipped_promotional} "
         "promotional post(s)."
     )
 
-    if args.preview:
-        print(
-            "Preview mode did not post anything "
-            "or change the processed-state file."
-        )
+    print(
+        "Preview mode did not post anything "
+        "or change the processed-state file."
+    )
 
     return 0
 

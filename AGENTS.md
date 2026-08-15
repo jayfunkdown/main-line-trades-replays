@@ -11,8 +11,6 @@ The project publishes and manages:
 - Earnings reactions
 - Private earnings review posts
 - Send-to-Signals workflow
-- TrendSpider chart posts
-- Truth Social / Trump posts
 - YouTube replay notifications
 - Discord moderation/supporting automation
 
@@ -136,51 +134,32 @@ Do NOT replace the weekly calendar with the older daily economic calendar behavi
 
 ---
 
-## TrendSpider
+## TrendSpider (retired)
 
     scripts/trendspider_filter.py
 
-Reads raw TrendSpider Discord content and forwards qualifying chart posts.
+Public chart forwarding from the TrendSpider raw intake channel was retired.
+TrendSpider raw posts remain visible in Discord without this automation.
 
-Production mode requires:
+The script still supports `--preview` for legacy debugging only. `--post` exits
+immediately without posting.
 
-    --post
-
-Production polling:
-
-    Every 1 minute
-
-Processed state:
+Retired processed state (do not reset casually):
 
     data/trendspider_processed.json
 
 ---
 
-## Truth Social / Trump
+## Truth Social / Trump (retired)
 
     scripts/trump_filter.py
 
-Reads raw Truth Social / Trump content and publishes qualifying posts.
+The staff Trump raw channel and public Truth Social channel were removed.
+Filter automation is retired; `--post` exits immediately without posting.
 
-Safe preview mode:
-
-    --preview
-
-Production mode:
-
-    --post
-
-Production polling:
-
-    Every 1 minute
-
-Processed state:
+Retired processed state (do not reset casually):
 
     data/trump_processed.json
-
-Historical backlog was deliberately seeded as processed before production was enabled.
-
-Do not reset this state casually.
 
 ---
 
@@ -265,12 +244,6 @@ Scheduled units:
     mainline-weekly-calendar.service
     mainline-weekly-calendar.timer
 
-    mainline-trendspider.service
-    mainline-trendspider.timer
-
-    mainline-trump-filter.service
-    mainline-trump-filter.timer
-
     mainline-youtube-replays.service
     mainline-youtube-replays.timer
 
@@ -335,22 +308,6 @@ Monday:
 
 ---
 
-## TrendSpider
-
-Every:
-
-    1 minute
-
----
-
-## Truth Social / Trump
-
-Every:
-
-    1 minute
-
----
-
 ## YouTube Replays
 
 Every:
@@ -365,8 +322,6 @@ These files are production runtime state:
 
     data/earnings_reactions_state.json
     data/earnings_calendar_cache.json
-    data/trendspider_processed.json
-    data/trump_processed.json
     data/posted_ids.json
     data/training_posted_ids.json
     data/video_intel_posted_ids.json
@@ -634,14 +589,6 @@ Failed Main Line units:
 Earnings logs:
 
     sudo journalctl -u mainline-earnings-post.service -n 80 --no-pager -l
-
-TrendSpider logs:
-
-    sudo journalctl -u mainline-trendspider.service -n 50 --no-pager
-
-Truth Social logs:
-
-    sudo journalctl -u mainline-trump-filter.service -n 50 --no-pager
 
 YouTube logs:
 
