@@ -11,7 +11,7 @@ below, change this file first.
 
 Trained from Jason’s charts: LNSR 6.42, MH 12.21, CRMD 7.13, PODC,
 POWERGRID, BSX, SGA, NFLX 77.65, AM 22.65, CGSM 26.49, FEPI 42.34,
-IBDT 25.38, JNK 96.7, and IMXI 13.06.
+IBDT 25.38, JNK 96.7, IMXI 13.06, and SAFT 73.77.
 
 ---
 
@@ -23,8 +23,9 @@ Comparing this week’s close to the prior week’s wick high/low is the wrong
 method. That is a different pattern and will fire on noise (tiny crypto
 breaks, etc.).
 
-The weekly is a **containment** from a swing extreme back to the **body**
-of the week that made that extreme.
+The weekly is a **containment** from a swing extreme back to the **start of
+the weekly move that made that extreme** — that candle’s **open**, on the
+body, never the wick.
 
 ---
 
@@ -47,13 +48,13 @@ the top of that drop.
    had kept falling from the X area into a new low (~8.30), the weekly
    would be that new-low week’s **body**, not the X. It did not, so
    **12.21 stays**.
-6. The weekly line is the **body of the week that printed that low** —
-   the weekly move that made the low. On IMXI that is 13.06, not the
-   earlier 14.54 bounce.
-7. Draw the line on that candle’s **body**:
-   `max(open, close)`. **Never the wick.**
+6. The weekly line is the **open of the impulse week that printed that
+   low** — the start of the weekly move that made the low. On IMXI that
+   is 13.06. A bounce before the low (IMXI 14.54) is not the weekly.
+7. Draw on that candle’s **body**, using the **open**. **Never the wick.**
+   Never the close of a later week that is only sitting on the extreme.
 8. **Gained the weekly** = a later weekly candle **closes through** that
-   body line (close strictly above it).
+   open (close strictly above it).
 
 ### Trained gain examples
 
@@ -62,6 +63,7 @@ the top of that drop.
 | LNSR | 6.42 | Body of the week that made the ~5 low. Close 8.27 is a take, still far from the line. |
 | MH | 12.21 | Body of the week that made the small-circle low. X is not the weekly. |
 | IMXI | 13.06 | Week of 2026-07-31 (open 13.06, low 11.15). The 14.54 bounce is not the weekly. |
+| SAFT | ~73.77 | Open of the spike week. 103 is sitting at the high, not the weekly. |
 | PODC | ~2.43 | Taken and still above the line. |
 | NFLX | 77.65 | Just through (close 78.16). Still inside 1% the same week. |
 | CRMD | 7.13 | Taken earlier; later wick/retest into the line. |
@@ -78,12 +80,18 @@ the same thing.
 1. Find the **swing high** of the range (the high of the move).
 2. That high must be a **new high**. If a later bounce does not make a
    new high, do **not** move the weekly.
-3. If it **does** make a new high, re-anchor to **that later week’s body**.
-4. Draw on the body of the week that printed that high:
-   `min(open, close)`. Never the wick. A bounce after the high is not
-   the weekly.
-5. **Lost the weekly** = a later weekly candle **closes through** that
-   body line to the downside (close strictly below it).
+3. If it **does** make a **new** high with a real later move, re-anchor
+   to that later impulse week’s **open**. Tiny weeks that only nick a
+   new high while sitting there do **not** move the weekly.
+4. The impulse week is the **large week that made the extreme**, not a
+   later tiny week that only nicks a new high (SAFT sitting at 103,
+   NWG sitting at 19.19).
+5. Draw on that impulse week’s **open**. Never the wick. Never the
+   **close of a dump** (VTRS 16.43, DBD 73.59). SAFT’s weekly is ~73.77
+   (open of the spike), not 103.
+6. **Lost the weekly** = a later weekly candle **closes through** that
+   open to the downside (close strictly below it). If price is still
+   sitting on the high, the weekly has not been lost.
 
 Most names that qualify will be gained / Long. Sometimes it is lost /
 Short. Both are valid.

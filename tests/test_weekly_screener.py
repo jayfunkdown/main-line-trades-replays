@@ -206,7 +206,7 @@ class WeeklyScreenerClassifierTests(unittest.TestCase):
             weekly_screener.is_retest(result["close"], result["level"], proximity=0.01)
         )
 
-    def test_loss_is_the_exact_inverse_of_gain(self):
+    def test_loss_uses_open_of_the_impulse_week(self):
         pivot = 10.0
         gain_weekly = lnsr_style_gain(close=8.27)
         loss_weekly = []
@@ -224,7 +224,63 @@ class WeeklyScreenerClassifierTests(unittest.TestCase):
         loss = weekly_screener.classify_weekly_structure(loss_weekly)
         self.assertEqual(gain["side"], "gain")
         self.assertEqual(loss["side"], "loss")
-        self.assertAlmostEqual(loss["level"], pivot * 2 - gain["level"], places=2)
+        self.assertAlmostEqual(gain["level"], 6.42, places=2)
+        origin = int(loss["origin_index"])
+        self.assertAlmostEqual(loss["level"], loss_weekly[origin]["open"], places=2)
+
+    def test_sitting_at_the_high_is_not_the_weekly(self):
+        """SAFT: spike from ~74 to 103, then tiny weeks at 103. Weekly is the spike open."""
+        weekly = make_weekly(
+            [
+                ("2026-04-10T20:00:00+00:00", 72.0, 73.0, 71.0, 72.5),
+                ("2026-04-17T20:00:00+00:00", 72.5, 74.0, 71.5, 73.0),
+                ("2026-04-24T20:00:00+00:00", 73.0, 74.0, 72.0, 72.8),
+                ("2026-05-01T20:00:00+00:00", 72.8, 73.5, 71.0, 71.5),
+                ("2026-05-08T20:00:00+00:00", 71.5, 72.0, 70.0, 70.5),
+                ("2026-05-15T20:00:00+00:00", 70.5, 72.0, 70.0, 71.0),
+                ("2026-05-22T20:00:00+00:00", 71.0, 73.0, 70.5, 72.0),
+                ("2026-05-29T20:00:00+00:00", 72.0, 75.0, 71.0, 74.5),
+                ("2026-06-05T20:00:00+00:00", 73.77, 103.42, 70.81, 103.20),
+                ("2026-06-12T20:00:00+00:00", 103.15, 103.57, 102.90, 103.39),
+                ("2026-06-19T20:00:00+00:00", 103.37, 103.75, 103.15, 103.50),
+                ("2026-06-26T20:00:00+00:00", 103.48, 103.75, 103.35, 103.35),
+            ]
+        )
+        result = weekly_screener.classify_weekly_structure(weekly)
+        self.assertNotAlmostEqual(float(result.get("level") or 0), 103.37, places=2)
+        if result["side"] == "loss":
+            self.assertAlmostEqual(result["level"], 73.77, places=2)
+        elif result["side"] == "gain":
+            self.assertLess(result["level"], 80.0)
+            self.assertFalse(
+                weekly_screener.is_retest(result["close"], result["level"], proximity=0.01)
+            )
+        else:
+            self.assertEqual(result["side"], "none")
+
+    def test_dump_week_close_is_not_the_weekly(self):
+        """VTRS/DBD: a crash week that tags a new high is not drawn on its close."""
+        weekly = make_weekly(
+            [
+                ("2026-04-10T20:00:00+00:00", 16.0, 16.2, 15.7, 16.1),
+                ("2026-04-17T20:00:00+00:00", 16.1, 16.4, 15.8, 16.3),
+                ("2026-04-24T20:00:00+00:00", 16.3, 16.5, 16.0, 16.4),
+                ("2026-05-01T20:00:00+00:00", 16.4, 16.8, 16.2, 16.6),
+                ("2026-05-08T20:00:00+00:00", 16.6, 17.0, 16.4, 16.9),
+                ("2026-05-15T20:00:00+00:00", 16.9, 17.3, 16.7, 17.2),
+                ("2026-05-22T20:00:00+00:00", 17.2, 17.5, 17.0, 17.4),
+                ("2026-05-29T20:00:00+00:00", 17.35, 18.07, 17.28, 17.56),
+                ("2026-06-05T20:00:00+00:00", 17.74, 18.39, 16.20, 16.43),
+                ("2026-06-12T20:00:00+00:00", 16.30, 16.71, 15.88, 16.23),
+            ]
+        )
+        result = weekly_screener.classify_weekly_structure(weekly)
+        self.assertNotAlmostEqual(float(result.get("level") or 0), 16.43, places=2)
+        if result["side"] == "loss":
+            self.assertAlmostEqual(result["level"], 17.74, places=2)
+            self.assertFalse(
+                weekly_screener.is_retest(result["close"], result["level"], proximity=0.01)
+            )
 
     def test_retest_fixtures(self):
         for name in ("retest_within_1_percent.json", "retest_too_far.json"):

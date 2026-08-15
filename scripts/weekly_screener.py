@@ -698,8 +698,15 @@ def candle_body_low(candle: dict[str, Any]) -> float:
     return min(float(candle["open"]), float(candle["close"]))
 
 
+EXTREME_CLUSTER_PCT = 0.01
+
+
+def candle_true_range(candle: dict[str, Any]) -> float:
+    return abs(float(candle["high"]) - float(candle["low"]))
+
+
 def swing_low_index(weekly: list[dict[str, Any]], *, right_pad: int = 1) -> int | None:
-    """Most recent local weekly low that still has a week after it."""
+    """Impulse week that printed the swing low, not a later nibble at the same low."""
     if len(weekly) < 8:
         return None
     end = len(weekly) - right_pad
@@ -713,18 +720,30 @@ def swing_low_index(weekly: list[dict[str, Any]], *, right_pad: int = 1) -> int 
         if best is None or low <= best_low:
             best = index
             best_low = low
-    return best
+    if best is None or best_low is None:
+        return None
+    band = abs(best_low) * (1.0 + EXTREME_CLUSTER_PCT)
+    impulse = best
+    impulse_range = candle_true_range(weekly[best])
+    for index in range(3, end):
+        if float(weekly[index]["low"]) > band:
+            continue
+        span = candle_true_range(weekly[index])
+        if span > impulse_range:
+            impulse = index
+            impulse_range = span
+    return impulse
 
 
 def origin_of_swing_low(weekly: list[dict[str, Any]], low_index: int) -> int | None:
-    """The week that printed this low. Line goes on that week's body, not a prior bounce."""
+    """Impulse week that made this low. Line goes on that week's open."""
     if low_index < 0 or low_index >= len(weekly):
         return None
     return low_index
 
 
 def swing_high_index(weekly: list[dict[str, Any]], *, right_pad: int = 1) -> int | None:
-    """Most recent local weekly high that still has a week after it."""
+    """Impulse week that printed the swing high, not a later nibble at the same high."""
     if len(weekly) < 8:
         return None
     end = len(weekly) - right_pad
@@ -738,14 +757,31 @@ def swing_high_index(weekly: list[dict[str, Any]], *, right_pad: int = 1) -> int
         if best is None or high >= best_high:
             best = index
             best_high = high
-    return best
+    if best is None or best_high is None:
+        return None
+    band = abs(best_high) * (1.0 - EXTREME_CLUSTER_PCT)
+    impulse = best
+    impulse_range = candle_true_range(weekly[best])
+    for index in range(3, end):
+        if float(weekly[index]["high"]) < band:
+            continue
+        span = candle_true_range(weekly[index])
+        if span > impulse_range:
+            impulse = index
+            impulse_range = span
+    return impulse
 
 
 def origin_of_swing_high(weekly: list[dict[str, Any]], high_index: int) -> int | None:
-    """The week that printed this high. Line goes on that week's body, not a prior bounce."""
+    """Impulse week that made this high. Line goes on that week's open."""
     if high_index < 0 or high_index >= len(weekly):
         return None
     return high_index
+
+
+def origin_level(candle: dict[str, Any]) -> float:
+    """Start of the weekly move. Never the wick, never a later sit-on-the-extreme close."""
+    return float(candle["open"])
 
 
 def _structure_hit(
@@ -802,7 +838,7 @@ def classify_weekly_structure(weekly: list[dict[str, Any]]) -> dict[str, Any]:
                     side="gain",
                     close=close,
                     week_id=week_id,
-                    level=candle_body_high(weekly[origin_index]),
+                    level=origin_level(weekly[origin_index]),
                     origin_index=origin_index,
                     weekly=weekly,
                     extra={"swing_low": float(weekly[low_index]["low"])},
@@ -818,7 +854,7 @@ def classify_weekly_structure(weekly: list[dict[str, Any]]) -> dict[str, Any]:
                     side="loss",
                     close=close,
                     week_id=week_id,
-                    level=candle_body_low(weekly[origin_index]),
+                    level=origin_level(weekly[origin_index]),
                     origin_index=origin_index,
                     weekly=weekly,
                     extra={"swing_high": float(weekly[high_index]["high"])},
