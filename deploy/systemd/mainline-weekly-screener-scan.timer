@@ -1,5 +1,5 @@
 [Unit]
-Description=Hourly weekly screener scan after each market weekly close (disabled until preview)
+Description=Hourly weekly screener scan after each market weekly close
 
 [Timer]
 OnCalendar=Fri *-*-* 16:30:00 America/New_York

@@ -14,7 +14,6 @@ Required for --watch:
     WEEKLY_SCREENER_WEBHOOK
 
 Optional:
-    WEEKLY_SCREENER_DAILY_MAX=10
     WEEKLY_SCREENER_CRYPTO_UNIVERSE_SIZE=750
     WEEKLY_SCREENER_US_MIN_PRICE=2
     WEEKLY_SCREENER_US_MIN_AVG_VOLUME=200000
@@ -98,7 +97,6 @@ FINNHUB_BASE_URL = "https://finnhub.io/api/v1"
 
 DISCORD_POST_DELAY_SECONDS = 2.0
 MAX_DISCORD_ATTEMPTS = 4
-DEFAULT_DAILY_MAX = 10
 DEFAULT_CRYPTO_UNIVERSE = 750
 DEFAULT_US_MIN_PRICE = 2.0
 DEFAULT_US_MIN_AVG_VOLUME = 200_000
@@ -991,19 +989,6 @@ def already_posted(state: dict[str, Any], key: str) -> bool:
     return isinstance(posted, dict) and key in posted
 
 
-def remaining_daily_slots(
-    state: dict[str, Any],
-    *,
-    date_label: str,
-    daily_max: int,
-) -> int:
-    daily = state.get("daily") or {}
-    posted_for_day = daily.get(date_label, [])
-    if not isinstance(posted_for_day, list):
-        posted_for_day = []
-    return max(daily_max - len(posted_for_day), 0)
-
-
 def mark_posted(
     state: dict[str, Any],
     *,
@@ -1514,10 +1499,6 @@ def configure_stdout() -> None:
 
 def runtime_settings() -> dict[str, Any]:
     return {
-        "daily_max": min(
-            env_int("WEEKLY_SCREENER_DAILY_MAX", DEFAULT_DAILY_MAX),
-            DEFAULT_DAILY_MAX,
-        ),
         "crypto_limit": env_int(
             "WEEKLY_SCREENER_CRYPTO_UNIVERSE_SIZE",
             DEFAULT_CRYPTO_UNIVERSE,
@@ -1641,8 +1622,7 @@ def main(argv: list[str] | None = None) -> None:
             f"Scan batch scanned: {scanned} | "
             f"Watch admissions: {len(hits)} | "
             f"Retest hits: {len(watch_hits)} | "
-            f"Failures: {failures + watch_failures} | "
-            f"Daily cap: {settings['daily_max']}"
+            f"Failures: {failures + watch_failures}"
         )
         print()
         print("PREVIEW ONLY — nothing was posted; posting state was not changed.")
@@ -1693,22 +1673,10 @@ def main(argv: list[str] | None = None) -> None:
         )
         return
 
-    remaining = remaining_daily_slots(
-        state,
-        date_label=date_label,
-        daily_max=settings["daily_max"],
-    )
-    if remaining <= 0:
-        print(f"Weekly screener already reached the daily cap for {date_label}.")
-        return
-
-    post_limit = min(
-        remaining,
-        arguments.limit if arguments.limit is not None else remaining,
-    )
+    post_limit = arguments.limit
     posted_count = 0
     for hit in hits:
-        if posted_count >= post_limit:
+        if post_limit is not None and posted_count >= post_limit:
             break
         key = posted_key(hit["symbol"], hit["side"], float(hit["level"]))
         if already_posted(state, key):

@@ -15,6 +15,8 @@ sudo systemctl enable --now \
   mainline-market-wrap.timer \
   mainline-morning-brief.timer \
   mainline-weekly-calendar.timer \
+  mainline-weekly-screener-scan.timer \
+  mainline-weekly-screener-watch.timer \
   mainline-youtube-training.timer \
   mainline-youtube-video-intel.timer \
   mainline-youtube-replays.timer
@@ -40,9 +42,7 @@ sudo rm -f /etc/systemd/system/mainline-trendspider.service \
 sudo systemctl daemon-reload
 ```
 
-Weekly screener units exist but must stay **disabled** until `--preview`
-is clean and `data/weekly_screener_state.json` has been seeded so the
-first `--watch` does not dump a backlog:
+Weekly gain/loss retest (public beta, no daily post cap):
 
 ```
 deploy/systemd/mainline-weekly-screener-scan.service
@@ -51,12 +51,13 @@ deploy/systemd/mainline-weekly-screener-watch.service
 deploy/systemd/mainline-weekly-screener-watch.timer
 ```
 
-`--scan` admits weekly gains/losses to a watchlist with no Discord post.
+`--scan` admits a gained or lost weekly to a watchlist with no Discord post.
 US batches run Friday 4:30 PM ET through Sunday. Crypto batches run after
 Monday 00:00 UTC, when that weekly has printed. `--watch` posts to
-`WEEKLY_SCREENER_WEBHOOK` when last price is within 1% of that level
-(every 15 minutes). Public beta channel from day one — no private review
-queue. Do not `enable --now` either timer until preview looks right.
+`WEEKLY_SCREENER_WEBHOOK` on the **first** 1% test of that body (every 15
+minutes). There is no daily card limit. Public beta from day one — no
+private review queue. An empty `data/weekly_screener_state.json` seeds
+current hits without posting; do not reset that file casually.
 
 The units assume the repository is at
 `/home/jason/main-line-trades-replays` with its virtual environment at
