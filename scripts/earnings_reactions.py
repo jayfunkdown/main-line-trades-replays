@@ -90,6 +90,11 @@ try:
 except ImportError:
     from discord_embeds import BRAND_NEON_PINK, bordered_embed
 
+try:
+    from . import staff_announcements
+except ImportError:
+    import staff_announcements
+
 
 FINNHUB_BASE_URL = "https://finnhub.io/api/v1"
 EASTERN = ZoneInfo("America/New_York")
@@ -4901,6 +4906,12 @@ async def run_review_button_bot() -> None:
     signal_reviews_channel_id = optional_channel_id(
         "SIGNAL_REVIEWS_CHANNEL_ID"
     )
+    announcements_draft_channel_id = optional_channel_id(
+        "ANNOUNCEMENTS_DRAFT_CHANNEL_ID"
+    )
+    announcements_channel_id = optional_channel_id(
+        "ANNOUNCEMENTS_CHANNEL_ID"
+    )
 
     intents = discord.Intents.default()
     client = discord.Client(intents=intents)
@@ -7242,6 +7253,219 @@ async def run_review_button_bot() -> None:
             ManualSignalModal(str(interaction.user.id))
         )
 
+    def announcement_banner_file() -> Any:
+        return discord.File(
+            staff_announcements.banner_path(),
+            filename=staff_announcements.ANNOUNCEMENT_BANNER_FILENAME,
+        )
+
+    def announcement_discord_embed(description: str) -> Any:
+        embed = discord.Embed(
+            description=description,
+            color=BRAND_NEON_PINK,
+        )
+        embed.set_image(
+            url=(
+                "attachment://"
+                + staff_announcements.ANNOUNCEMENT_BANNER_FILENAME
+            )
+        )
+        return embed
+
+    class AnnouncementModal(discord.ui.Modal):
+        def __init__(self, *, headline: str = "", body: str = ""):
+            super().__init__(title="Staff Announcement")
+            self.headline = discord.ui.TextInput(
+                required=True,
+                max_length=180,
+                default=headline or None,
+            )
+            self.body = discord.ui.TextInput(
+                style=discord.TextStyle.paragraph,
+                required=True,
+                max_length=1800,
+                default=body or None,
+            )
+            self.add_item(
+                discord.ui.Label(text="Headline", component=self.headline)
+            )
+            self.add_item(
+                discord.ui.Label(text="Announcement", component=self.body)
+            )
+
+        async def on_submit(self, interaction: discord.Interaction) -> None:
+            if (
+                announcements_draft_channel_id is None
+                or discord_id_text(getattr(interaction, "channel_id", None))
+                != str(announcements_draft_channel_id)
+            ):
+                await send_ephemeral_rejection(
+                    interaction,
+                    "This command is not available here.",
+                )
+                return
+            try:
+                description = staff_announcements.build_announcement_description(
+                    str(self.headline.value),
+                    str(self.body.value),
+                )
+            except ValueError as exc:
+                await send_ephemeral_rejection(interaction, str(exc))
+                return
+            await interaction.response.defer(ephemeral=True)
+            channel = interaction.channel
+            await channel.send(
+                embed=announcement_discord_embed(description),
+                file=announcement_banner_file(),
+                view=AnnouncementDraftView(),
+            )
+            await interaction.followup.send(
+                "Draft posted in this channel. Publish when it looks right.",
+                ephemeral=True,
+            )
+
+    class AnnouncementDraftView(discord.ui.View):
+        def __init__(self) -> None:
+            super().__init__(timeout=None)
+
+        @discord.ui.button(
+            label="Publish",
+            style=discord.ButtonStyle.success,
+            emoji="📣",
+            custom_id="announce_publish",
+        )
+        async def publish(
+            self,
+            interaction: discord.Interaction,
+            button: discord.ui.Button,
+        ) -> None:
+            if not can_clear_earnings_review(
+                getattr(interaction, "user", None),
+                getattr(interaction, "guild", None),
+            ):
+                await send_ephemeral_rejection(
+                    interaction,
+                    "You are not allowed to publish announcements.",
+                )
+                return
+            if announcements_channel_id is None:
+                await send_ephemeral_rejection(
+                    interaction,
+                    "ANNOUNCEMENTS_CHANNEL_ID is not configured.",
+                )
+                return
+            message = interaction.message
+            embeds = list(getattr(message, "embeds", None) or [])
+            if not embeds:
+                await send_ephemeral_rejection(
+                    interaction,
+                    "This announcement draft has no card to publish.",
+                )
+                return
+            description = str(embeds[0].description or "").strip()
+            if not description:
+                await send_ephemeral_rejection(
+                    interaction,
+                    "This announcement draft has no text.",
+                )
+                return
+            await interaction.response.defer(ephemeral=True)
+            dest = interaction.client.get_channel(announcements_channel_id)
+            if dest is None:
+                dest = await interaction.client.fetch_channel(
+                    announcements_channel_id
+                )
+            await dest.send(
+                content="@everyone",
+                embed=announcement_discord_embed(description),
+                file=announcement_banner_file(),
+                allowed_mentions=discord.AllowedMentions(everyone=True),
+            )
+            await interaction.followup.send(
+                "Published to the announcements channel.",
+                ephemeral=True,
+            )
+
+        @discord.ui.button(
+            label="Dismiss",
+            style=discord.ButtonStyle.secondary,
+            custom_id="announce_dismiss",
+        )
+        async def dismiss(
+            self,
+            interaction: discord.Interaction,
+            button: discord.ui.Button,
+        ) -> None:
+            if not can_clear_earnings_review(
+                getattr(interaction, "user", None),
+                getattr(interaction, "guild", None),
+            ):
+                await send_ephemeral_rejection(
+                    interaction,
+                    "You are not allowed to dismiss announcements.",
+                )
+                return
+            await interaction.response.defer(ephemeral=True)
+            message = interaction.message
+            try:
+                await message.delete()
+            except Exception:
+                await interaction.followup.send(
+                    "Could not delete that draft.",
+                    ephemeral=True,
+                )
+                return
+            await interaction.followup.send(
+                "Draft dismissed.",
+                ephemeral=True,
+            )
+
+    @command_tree.command(
+        name="announce",
+        description="Draft a staff announcement card.",
+    )
+    @discord.app_commands.guild_only()
+    @discord.app_commands.default_permissions(manage_messages=True)
+    @discord.app_commands.describe(
+        template="Start blank or from the new Signals channel copy.",
+    )
+    @discord.app_commands.choices(
+        template=[
+            discord.app_commands.Choice(name="Blank", value="blank"),
+            discord.app_commands.Choice(
+                name="New Signals channel",
+                value="signals",
+            ),
+        ]
+    )
+    async def announce(
+        interaction: discord.Interaction,
+        template: discord.app_commands.Choice[str] | None = None,
+    ) -> None:
+        if (
+            announcements_draft_channel_id is None
+            or not can_clear_earnings_review(
+                getattr(interaction, "user", None),
+                getattr(interaction, "guild", None),
+            )
+            or discord_id_text(getattr(interaction, "channel_id", None))
+            != str(announcements_draft_channel_id)
+        ):
+            await send_ephemeral_rejection(
+                interaction,
+                "This command is not available here.",
+            )
+            return
+        choice = str(getattr(template, "value", None) or "blank")
+        headline = ""
+        body = ""
+        if choice == "signals":
+            headline = staff_announcements.SIGNALS_ANNOUNCEMENT_HEADLINE
+            body = staff_announcements.SIGNALS_ANNOUNCEMENT_BODY
+        await interaction.response.send_modal(
+            AnnouncementModal(headline=headline, body=body)
+        )
+
     @command_tree.command(
         name="clear-earnings-review",
         description="Clear bot posts from earnings review.",
@@ -7392,6 +7616,7 @@ async def run_review_button_bot() -> None:
     # review messages are posted by a separate process through REST.
     client.add_view(ManualSignalDraftView())
     client.add_view(EarningsReviewView())
+    client.add_view(AnnouncementDraftView())
     if (
         signal_review_drafts_channel_id is not None
         and signal_reviews_channel_id is not None
