@@ -7440,7 +7440,7 @@ async def run_review_button_bot() -> None:
     )
     async def announce(
         interaction: discord.Interaction,
-        template: discord.app_commands.Choice[str] | None = None,
+        template: str | None = None,
     ) -> None:
         if (
             announcements_draft_channel_id is None
@@ -7456,7 +7456,7 @@ async def run_review_button_bot() -> None:
                 "This command is not available here.",
             )
             return
-        choice = str(getattr(template, "value", None) or "blank")
+        choice = str(template or "blank")
         headline = ""
         body = ""
         if choice == "signals":
