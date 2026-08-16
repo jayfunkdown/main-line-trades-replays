@@ -78,33 +78,39 @@ class CryptoMoversTests(unittest.TestCase):
         self.assertEqual(crypto_movers.movement_score(-15), 15 * 5 + 25)
         self.assertEqual(crypto_movers.movement_score(7), 7 * 5 + 8)
 
-    def test_priority_coin_qualifies_at_lower_move_threshold(self):
+    def test_priority_coin_still_requires_ten_percent_move(self):
         coin = dict(SAMPLE_COINS[0])
-        coin["price_change_percentage_24h"] = 4.0
+        coin["symbol"] = "avax"
+        coin["price_change_percentage_24h"] = -3.9
         candidate = crypto_movers.calculate_candidate(coin)
 
-        with patch.dict(
-            os.environ,
-            {
-                "CRYPTO_MOVERS_MIN_MOVE_PCT": "5",
-                "CRYPTO_MOVERS_PRIORITY_MIN_MOVE_PCT": "3",
-            },
-            clear=False,
-        ):
-            self.assertTrue(crypto_movers.qualifies_for_public(candidate))
+        self.assertTrue(candidate["priority"])
+        self.assertFalse(crypto_movers.qualifies_for_public(candidate))
 
-    def test_non_priority_coin_requires_default_move_threshold(self):
+        coin["price_change_percentage_24h"] = -10.0
+        candidate = crypto_movers.calculate_candidate(coin)
+        self.assertTrue(crypto_movers.qualifies_for_public(candidate))
+
+    def test_env_cannot_lower_the_ten_percent_floor(self):
         candidate = crypto_movers.calculate_candidate(SAMPLE_COINS[3])
 
         with patch.dict(
             os.environ,
             {
-                "CRYPTO_MOVERS_MIN_MOVE_PCT": "5",
-                "CRYPTO_MOVERS_PRIORITY_MIN_MOVE_PCT": "3",
+                "CRYPTO_MOVERS_MIN_MOVE_PCT": "3",
+                "CRYPTO_MOVERS_PRIORITY_MIN_MOVE_PCT": "1",
             },
             clear=False,
         ):
             self.assertFalse(crypto_movers.qualifies_for_public(candidate))
+
+    def test_daily_max_cannot_exceed_ten(self):
+        with patch.dict(
+            os.environ,
+            {"CRYPTO_MOVERS_DAILY_MAX": "50"},
+            clear=False,
+        ):
+            self.assertEqual(crypto_movers.daily_post_max(), 10)
 
     def test_rank_candidates_prefers_higher_score_and_priority(self):
         candidates = [

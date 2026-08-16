@@ -11,8 +11,7 @@ Required for --post:
 Optional:
     COINGECKO_API_KEY
     CRYPTO_MOVERS_DAILY_MAX=10
-    CRYPTO_MOVERS_MIN_MOVE_PCT=5
-    CRYPTO_MOVERS_PRIORITY_MIN_MOVE_PCT=3
+    CRYPTO_MOVERS_MIN_MOVE_PCT=10
     CRYPTO_MOVERS_UNIVERSE_SIZE=100
 """
 
@@ -62,6 +61,9 @@ COINGECKO_BASE_URL = "https://api.coingecko.com/api/v3"
 EASTERN = ZoneInfo("America/New_York")
 USER_AGENT = "MainLineTrades-CryptoMovers/1.0"
 WEBHOOK_USERNAME = "Main Line Trades Crypto Movers"
+
+DEFAULT_MIN_MOVE_PCT = 10.0
+DEFAULT_DAILY_MAX = 10
 
 DISCORD_POST_DELAY_SECONDS = 2.0
 MAX_DISCORD_ATTEMPTS = 4
@@ -277,26 +279,27 @@ def calculate_candidate(coin: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def min_move_pct() -> float:
+    return max(
+        env_float("CRYPTO_MOVERS_MIN_MOVE_PCT", DEFAULT_MIN_MOVE_PCT),
+        DEFAULT_MIN_MOVE_PCT,
+    )
+
+
+def daily_post_max() -> int:
+    return min(
+        max(env_int("CRYPTO_MOVERS_DAILY_MAX", DEFAULT_DAILY_MAX), 1),
+        DEFAULT_DAILY_MAX,
+    )
+
+
 def qualifies_for_public(candidate: dict[str, Any]) -> bool:
     change_24h = candidate["change_24h"]
 
     if change_24h is None:
         return False
 
-    absolute_move = abs(change_24h)
-    minimum_move = max(
-        env_float("CRYPTO_MOVERS_MIN_MOVE_PCT", 5),
-        5,
-    )
-    priority_minimum = env_float(
-        "CRYPTO_MOVERS_PRIORITY_MIN_MOVE_PCT",
-        3,
-    )
-
-    if candidate["priority"] and absolute_move >= priority_minimum:
-        return True
-
-    return absolute_move >= minimum_move
+    return abs(change_24h) >= min_move_pct()
 
 
 def rank_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -620,7 +623,7 @@ def main(argv: list[str] | None = None) -> None:
     arguments = parse_args(argv)
     date_label = eastern_today_label()
     universe_size = env_int("CRYPTO_MOVERS_UNIVERSE_SIZE", 100)
-    daily_max = min(env_int("CRYPTO_MOVERS_DAILY_MAX", 10), 10)
+    daily_max = daily_post_max()
 
     coins = fetch_top_coins(universe_size)
     candidates = [calculate_candidate(coin) for coin in coins]
